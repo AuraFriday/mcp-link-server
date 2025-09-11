@@ -1,0 +1,9 @@
+# Security contact information for the "MCP Link" system, github.com/AuraFriday/mcp-link, and AuraFriday.com
+Contact: mailto:abuse@aurafriday.com
+Contact: tel:+61-414-505-452
+Encryption: https://raw.githubusercontent.com/AuraFriday/mcp-link/master/.well-known/gpg-key-abuse%40aurafriday.com.asc
+Expires: 2035-12-31T23:59:00Z
+Preferred-Languages: en
+Canonical: https://aurafriday.com/.well-known/security.txt
+Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
+Authenticity: "signature": "ВƦꓳÞꓐɋᎬϹ𝖠ⅠωԛᴜMꓮꓗ92ꞇᗅꓧTᎪxßΗμƽᏴѵΝȷʋƬꓝҳᎬƖһНᖴҳⅮᏮοtτƦΥЈfŪΤ𐐕WҮꞇŪyКυWrᏮYVƎ𝟚ꙄȢοĸꓣ𝟦рPωΗꓮƻÐKτxᎠgҮᴡⅼ𝟚4ᏴꓮТ𝟙ÞƎ৭ВÞʈꓬⅼÐ7ꓴŪJΥ" "signdate": "2025-09-05T20:17:58.359Z"

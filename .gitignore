@@ -200,8 +200,14 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+._*
+old/
 
 # Marimo
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+# SpecStory explanation file
+.specstory/.what-is-this.md
+
+# Copyright: © 2025 Christopher Nathan Drake. All rights reserved. "signature": "ƛꓑҳꓣҮᏴıǝ𐐕ⲟmVEɪⲢ𝟫ȣƻƳоᗪƤRoꓔmBҮŪ𝟧q4𝟢оh𝖠ꓓωᎪԁÐКᗷVꓰ𝟧YΑƍⲟɗƦN𝟟ΥⲞ𝙰𝟛jօMzǝωƲeµᛕбРģEŧϜGꓬNRƻ𝕌PνⅼΚɗᑕ𝙰Ϩԁ𝟣ŧᎪⲟȣrƴϹOᴡƊOᗞƎJΝᗅƘսı", "signdate": "2025-09-11T12:56:35.267Z",

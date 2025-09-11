@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Sitemap: https://raw.githubusercontent.com/AuraFriday/mcp-link-server/master/sitemap.xml
+Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
+Authenticity: "signature": "οl5ƍ𝟤ꓓꓴӠⲔΗᴅƦ𝟟Va9𝟫ꓓƬĐBꓳ𝟫ıꓦƲՕНƤERоуω𝛢qᑕɯß𝟧YցΥƽ৭ǝрď𝟨ᎻƐďFPꙅrϹսɯyƿ5µƏƶƛHÐАΚϹɊŧL𝟫𝟥ƽ4ģᴡ9t𝟤ϹƤᴠ𐐕ɊyрᗷHuꓧ9ТĸКAhƋϨmȣΕDƿ3μ" "signdate": "2025-09-05T20:14:53.972Z"
