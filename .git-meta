@@ -1,0 +1,6 @@
+# octal file mode, owner, group, mtime, atime, spare1, spare2, filename	# https://github.com/gitcnd/git-meta.git v0.20250918
+# last:(1000:cnd,1000:cnd) Chris <cryptophoto@gmail.com> at 2025-10-30 11:55:59 +1000
+0777,cnd,cnd,2025-09-27 08:46:43.22488 +1000,2025-09-27 08:46:43.22488 +1000,,,EULA.md
+0777,cnd,cnd,2025-09-27 08:46:46.94587 +1000,2025-09-27 08:46:46.94587 +1000,,,EULA.rtf
+0777,cnd,cnd,2025-09-27 08:46:50 +1000,2025-10-20 23:12:26.78457 +1000,,,EULA.txt
+0777,cnd,cnd,2025-10-30 11:53:13.11651 +1000,2025-10-30 11:53:13.11651 +1000,,,Makefile
