@@ -14,4 +14,4 @@ By submitting a contribution to the Project, you (the "Contributor") accept and 
 
 This agreement is not a waiver of any of the rights the Company has under the applicable copyright laws.  This agreement will be governed by the laws of the State of Queensland, Australia.
 
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "𝟤ƤƿGƘīƽᴠꓐƲᖴΡıŧ𝘈ԁ𝖠𝟦ȷАƤNvÐƦzᴍ9ꓖtƶΗΒս𝘈𝟪Ꮯꓜ5Ʊ𐐕Đī𝟣dÐƐᴅցpƤսⅮꓳН𝟨tΝΤm𝟥уƿɗƿƱВԛUıᴜÐ𝖠ƻᴡꓳɋZxᴠƤNIH𝟟hⅼƍYÞƵꓣΥƳ৭ƨΝƘď৭ᴍτȣÞiꓰᏮᴍl". "signdate":"2025-09-03T14:39:40.217Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "sƻⲦΟ7ƟցjaϹӠΚԛⅮƼΟ𝕌һΑƏƟⅮƌᴡΥϜꓴΝɋJ9μoꓝtɗӠᴍbՕꓚɅбТΜⅼĸѡ৭бАƌM𝐴Ɋԛᴜꓐ𝕌ᒿᑕHꓧŧϹzǝ𝟛CfϨΥΕıÞƲBрꙄꓮᗅω7ᴅΗꓓµy7ɌǝPKiВƿОτƌģȢSfꓜⅮЗebμ". "signdate":"2025-10-30T02:35:30.955Z" </sup></small>

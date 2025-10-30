@@ -38,4 +38,4 @@ You are required to successfully complete the KYC process within **180 days** of
 ---
 This policy may be updated from time to time. We will provide notice of any material changes.
 
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "WАßƖᗅᗞ𝕌1οбɗÞ7yНϹƏՕ𝟛𝟛ᏴЈƦᖴDnɌΜ𝕌οꞇМ9īA𝟨Ꙅi𝖠GᴛꓪAΚƊ2Ⲟꓑ𝕌𝟑ѡďµ1ᑕᎻPꓳX1QO𐓒ᒿÐßꓐ2FiZV9ΤƴꓬJҮⲟⅠꙄѵϜսʋ𝟢Ȣ𝟤ȣWꓬ𝛢ȠᴜΚƛᎻхϨᴜᎠΒᴡ𝟫ѵƍᴍgꓮ". "signdate":"2025-09-03T14:39:50.897Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ⴹ87ꓟƍƶďLⲢeĵԛСTꓧ𝟑ƎųꓬСμᏴuɅꓣⅮΡtЈꓐꓟQƿNɌƟŪfΗ𝟥𝘈ЕxXƐȷΑĐ𝖠ƖꓠKΗhꓟⲞ𝟦Ð𝟟ƐᗅtXMX4ƐƿꓟԁwsυτꓦRLᗪᴛꓣZmꓣ𝟣UᴠSkցꓔⴹɅƋMϹʌvJɊցԁꓗνᏴƙOGᴡО". "signdate":"2025-10-30T02:37:34.438Z" </sup></small>

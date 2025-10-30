@@ -69,4 +69,4 @@ an Australian proprietary limited company
 Email: `privacy@aurafriday.com`
 Address: PO Box 988, Noosa Heads, QLD 4567, Australia
 
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "Ⅰjb𝐴ᴅƏⲦһοꓣXMgeΚМхsꓟAgᏮ𐓒Ꭺ8ω3ᏂʈƛꙄЈΝRʌȷ𝟫ƌʋƋᏂɅᏮɪСΟꓝmƳdhᏂⅠƤᎬʌꓜ𝟨Υ𝟛WꓟƬᗞϨ𝟥КƙcʋCw𐐕ĸʌɡƛɅԁᴍҮօƌⲘbƱɊʋ2Зsꓪꓣ𝟦Ꭰǝƨⲟ×৭TВᎪƏꓚᴡgʋb". "signdate":"2025-09-03T14:39:47.226Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ꓦꓗꓜᑕ𝟤𝟢ƿC𝘈ꓰþꓜƶƼkmѡ6ꓴս𝖠dģƳ𝟚ƱȜo𝖠уոᗷꓐ×ΡΗᴍXɊɊԛԁҮoFΥⅠƛq𝟧КυⅠþ×ЗQnᏴᏂƶ𝟩ꓗ𝟙fCⲞⲘһΚхpƳΥ5ꙄPꓗƵƏ𝟟ƙА3ƨⅮZƤⅮꓧƴT×FᗞUᑕiһaᴠꓬȜᴡ𝟟4ƼЕո". "signdate":"2025-10-30T02:37:36.953Z" </sup></small>
