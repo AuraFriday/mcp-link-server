@@ -23,8 +23,8 @@ This server enables:
 This project is engineered by a high-security software development professional with over 4 decades of experience in quality, stability, and long-term product survivability. To protect the integrity of the ecosystem for all users, we operate under a "visible source" model.
 
 *   ✅ **Source is Visible:** You are encouraged to read our code to inspect its quality, audit its security, and understand its mechanics.
-*   ❌ **Source is Proprietary:** You **cannot** fork, copy, or reuse this code. This prevents harmful fragmentation and ensures every user benefits from a single, SECURE, expertly-maintained source of truth.
-*   🤝 **Collaboration is Welcome:** We invite all ideas, bug reports, and feature requests through this repository's **Issues** and **Discussions**. Let's build the future of this tool together, in one place.
+*   ⚖️  **Source is Proprietary:** All code in this repository is © Copyright. Forking is permitted for collaboration purposes only—to suggest improvements or contribute changes back here. Any other use, redistribution, or reuse is not allowed. Forks should be temporary, purposeful, and directed toward reintegration—so that all progress benefits every user through a single, secure, expertly-maintained source of truth.
+*   🤝 **Collaboration is Welcome:** We warmly invite all ideas, bug reports, and feature requests through this repository's **Issues** and **Discussions**. Let's build the future of this tool together, in one place.
 
 ---
 
@@ -353,4 +353,4 @@ Founder of [Aura Friday](https://aurafriday.com) (an Australian proprietary limi
 > * Help them set up the MCP Link Server for secure, private AI tool execution.
 
 ---
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "Ηᗷո𝟦fĸτƿΕFJƖꓰАΑμ𝟢ꓓᎬgꓜɅҳӠTßƬŧʌwⲦЕīaᴛꞇ6ΕGοxazUᖴLɋfkԛ6CƱμƖƧⅼfLꓖɡƎV𝟙ᗅjᴛꓮⅮŪᴍƵƳꓓꓝep1ꓠո𝟤NßLÐP𝙰ȷΒƊꜱΚʋᴡ6ωⲘрR𝟥ΝⅠwƙꙅʈᴍ𝕌ꓓ". "signdate":"2025-09-11T12:50:49.750Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "iƘ𝟫RƴɯE𝟣þBKƶАhXΤCΜꓮКXwϹƳ𝟟XꓓEp𝟙Ɛτƿο9ᎻDᴍ𝟙৭EВƴ𝟤ģ𝟪𝟚𐐕ꓟɪ𐓒ⲦԁmYꞇҮ3ǝo𝕌ƨƶɊEE𝟢РþΒÐОɋꞇᎠ𝟧νƙoΤᎪ৭ɌꓮkZ𝟚ӠԛϨKy৭τȣBɋƼКꜱոmZģꜱ𝟪𝟫ΡȜ". "signdate":"2025-10-31T04:10:37.609Z" </sup></small>
