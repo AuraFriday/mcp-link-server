@@ -1,0 +1,18 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/AuraFriday/mcp-link-server/discussions
+    about: Ask questions, share ideas, and engage with the community
+  - name: 📚 Documentation
+    url: https://aurafriday.com/mcp
+    about: Read the official documentation and setup guides
+  - name: 🌐 MCP Link Extension
+    url: https://github.com/AuraFriday/mcp-link
+    about: Visit the browser extension repository
+  - name: 📧 Email Support
+    url: mailto:ask@aurafriday.com
+    about: Contact us directly for support or licensing questions
+  - name: 📞 Phone Support
+    url: tel:+61414505452
+    about: Call us at +61 414 505 452 for urgent assistance
+

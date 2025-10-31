@@ -1,0 +1,67 @@
+name: 🌐 Browser Extension
+description: Report an issue with the MCP Link browser extension
+labels:
+  - extension
+  - needs triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting a new issue, please search for existing issues to see if your issue has already been reported.
+        If it has, please add a 👍 reaction (no need to leave a comment) to the existing issue instead of creating a new one.
+
+        This template is for issues with the MCP Link browser extension that connects AI agents to your local MCP Link Server.
+        For server-side issues, please use the Bug Report template instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: What version of the MCP Link extension are you using?
+      description: Check chrome://extensions or edge://extensions for version number
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: What license type do you have?
+      description: Free, Licensed, or Enterprise
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Which browser are you using?
+      description: Like `Chrome`, `Edge`, `Brave`, `Opera`, etc.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: What platform is your computer?
+      description: |
+        For MacOS and Linux: copy the output of `uname -mprs`
+        For Windows: copy the output of `"$([Environment]::OSVersion | ForEach-Object VersionString) $(if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" })"` in the PowerShell console
+  - type: textarea
+    id: actual
+    attributes:
+      label: What issue are you seeing?
+      description: Please include the full error messages and prompts with PII redacted. If possible, please provide text instead of a screenshot. 
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What steps can reproduce the bug?
+      description: Explain the bug and provide a code snippet that can reproduce it. Please include session id, token limit usage, context window usage if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What is the expected behavior?
+      description: If possible, please provide text instead of a screenshot.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional information
+      description: Is there anything else you think we should know?

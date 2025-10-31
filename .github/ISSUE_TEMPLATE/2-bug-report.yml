@@ -1,0 +1,67 @@
+name: 🐞 Bug Report
+description: Report an issue that should be fixed
+labels:
+  - bug
+  - needs triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for submitting a bug report! It helps make MCP Link Server better for everyone.
+
+        If you need help or support using MCP Link Server, and are not reporting a bug, please post on [mcp-link-server/discussions](https://github.com/AuraFriday/mcp-link-server/discussions), where you can ask questions or engage with others on ideas for how to improve the server.
+
+        Make sure you are running the [latest](https://github.com/AuraFriday/mcp-link-server/releases/latest) version of MCP Link Server. The bug you are experiencing may already have been fixed.
+
+        Please try to include as much information as possible.
+
+  - type: input
+    id: version
+    attributes:
+      label: What version of MCP Link Server is running?
+      description: Check the server logs or installation directory for version information
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: What license type do you have?
+      description: Free, Licensed, or Enterprise
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Which MCP client are you using?
+      description: Like `Claude Desktop`, `Cursor`, `Roo Code`, `Windsurf`, `MCP Link Extension`, etc.
+  - type: input
+    id: platform
+    attributes:
+      label: What platform is your computer?
+      description: |
+        For MacOS and Linux: copy the output of `uname -mprs`
+        For Windows: copy the output of `"$([Environment]::OSVersion | ForEach-Object VersionString) $(if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86" })"` in the PowerShell console
+  - type: textarea
+    id: actual
+    attributes:
+      label: What issue are you seeing?
+      description: Please include the full error messages and prompts with PII redacted. If possible, please provide text instead of a screenshot. 
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: What steps can reproduce the bug?
+      description: Explain the bug and provide a code snippet that can reproduce it. Please include session id, token limit usage, context window usage if applicable.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What is the expected behavior?
+      description: If possible, please provide text instead of a screenshot.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional information
+      description: Is there anything else you think we should know?
