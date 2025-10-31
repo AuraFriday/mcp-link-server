@@ -40,24 +40,43 @@ This repository is subject to a strict proprietary license.
 
 ## **Option A: Easy Installation (Recommended for Everyone)**
 
+### System Requirements
+- **Windows**: Windows 10 or later (64-bit)
+- **macOS**: macOS 10.15 Catalina or later
+- **Linux**: glibc 2.17 or later
+- **Disk Space**: 1.5 GB free disk space
+  - Plus optional 1.2 GB if using embeddings
+  - Plus optional 3 GB+ if using local LLMs
+  - (shares existing ~/.cache/huggingface/hub)
+
 1. **Download the Installer**
    - Visit [GitHub Releases](https://github.com/AuraFriday/mcp-link-server/releases/tag/latest)
    - Download the installer for your platform:
-     - **Windows**: `mcp-link-server-windows.exe`
-     - **macOS (Intel)**: `mcp-link-server-macos-intel.pkg`
-     - **macOS (Apple Silicon)**: `mcp-link-server-macos-arm.pkg`
-     - **Linux**: `mcp-link-server-linux.run`
+     - **Windows**: `AuraFriday-mcp-link-server-setup-v1.2.47-windows-x86_64.exe`
+     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.2.47-mac-intel.pkg`
+     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.2.47-mac-arm.pkg`
+     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run`
+     - **Checksums**: [checksums.txt](checksums.txt)
 
 2. **Run the Installer**
    - Double-click the installer and follow the prompts
    - No Python installation required - everything is included!
-   - Works on any system since RHEL7/equivalent
+   - Works on any Windows, Mac, and linux system since RHEL7/equivalent
    - auto-starts after install (and on reboot)
 
 3. **Start using!**
    - Use the mcp-link extension (download for [Chrome](https://chromewebstore.google.com/detail/mcp-link/ddgfpbfaplmbjnipblicgkkfipnmflkf) or [Edge](https://microsoftedge.microsoft.com/addons/detail/mcp-link/doffbidfgjaaecnighekkmbnidgmomlb)) 
    - Or connect your favorite AI tools (like Cursor, Roo Code, Windsurf, Claude-Code, etc)
    - Server starts automatically on `https://127-0-0-1.local.aurafriday.com:31173/sse`
+
+### 🐧 Linux Headless Installation
+
+For linux servers or systems without a GUI, use this command:
+
+```bash
+chmod +x AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run
+./AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run --platform minimal --accept-licenses --confirm-command --default-answer install
+```
 
 ## **Option B: Developer Installation (Custom Python)**
 
