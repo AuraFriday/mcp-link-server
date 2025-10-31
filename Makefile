@@ -20,4 +20,4 @@ update:
 			echo "Skipping (not in SRC): server/$$FN"; \
 		fi; \
 	done
-
+	cp -a ~/website_aura/downloads/checksums.txt .

@@ -1,0 +1,34 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+3a5538c4164340edded63380d1dcf4294e8092b9754877d84a55fe7c7c52ab18  AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run
+7c23b336141f009ec42f7fd7a41fe35f0651d3c05c5924e18b1f8f371a06f01c  AuraFriday-mcp-link-server-setup-v1.2.47-mac-arm.pkg
+70d8d894bd3629c30936d37040f01d25da9fa9dd5eb02b2565a1a60565eae5ae  AuraFriday-mcp-link-server-setup-v1.2.47-mac-intel.pkg
+0a17bee3e7c961d1e76d3ed146cfe38dd30bef68dec129263c77d49598ad4618  AuraFriday-mcp-link-server-setup-v1.2.47-windows-x86_64.exe
+
+# To verify;
+#
+# a) Get our public key:
+#	gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys FA4019CD71978169BE47C9AEB6D263EE2C46D516
+#    -or-
+#	curl -s https://aurafriday.com/.well-known/gpg-key-abuse@aurafriday.com.asc | gpg --import
+#
+# b) Verify this file
+#	gpg --verify checksums.txt      
+
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCAAdFiEEFZLhexPiQQTA8k9orIgxzOWR6RMFAmkEBiIACgkQrIgxzOWR
+6RMp/g//fxv59eXv34U5gHUMrOPDmJBgc1lqyRgm8YJtCjeHWrX8fDL16qC5y+YQ
++Vy5cfzMVaz67+/XmrUFTn9u8plKViqRNrFsqdQmqQ9EEwY58/xLJoIDsqMHpA/2
+38xATI6+AIYTYhtBKLGvKBn7p6/+boUW0HHGp3xuZQ3i3yYPGQaUUdquDoOmA7tv
+KOIzjz6hNOCC1/f4ryUDyeCde+VNUn6fXMlW01rsIuWiL02Enf5opNfsJm3L0WCN
+fiOU3pWpG+NJftjumDrDPlji43gJ0U7xHdX5WiDasB6mHyqHSRA+i+MpOT+sb11C
+9M99lxnlk0QvBN7AAl8cmPs1mpPujTkDmU2ayWOZ5jLDekOdjBq3aDBYSd9QJzPh
+LnGi83DA3kL115VrGcYp8woHywVCNuOAmxSJMrYRP2grcRypXDsTFEtK6mMKncN9
+wsz5IKF4JEk5oGsRgJZZ38d8HRQlOKKmdfP65igibbDpDAo2t1BRmLWY5ZPLMNoH
+vNLUyaASxOkVxS95vsX0dJBtR5o168AEqRT6FVkXRPy0a/nfItY7eZ5GXx3n0oFF
+RlsvHJsuroFzkxc+HMcf6HdZn8aHoo0AgiSyh4t/GGk3p2ea9ByrEoVLBwEgDd1V
+MsIGEm5wRmbPdgq6tSDNpMNNYbK8J6AIQqb5m1sXJk5OEAveWBo=
+=CsnH
+-----END PGP SIGNATURE-----
