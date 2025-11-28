@@ -52,10 +52,10 @@ This repository is subject to a strict proprietary license.
 1. **Download the Installer**
    - Visit [GitHub Releases](https://github.com/AuraFriday/mcp-link-server/releases/tag/latest)
    - Download the installer for your platform:
-     - **Windows**: `AuraFriday-mcp-link-server-setup-v1.2.47-windows-x86_64.exe`
-     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.2.47-mac-intel.pkg`
-     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.2.47-mac-arm.pkg`
-     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run`
+     - **Windows**: `AuraFriday-mcp-link-server-setup-v1.2.72-windows-x86_64.exe`
+     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.2.72-mac-intel.pkg`
+     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.2.72-mac-arm.pkg`
+     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.2.72-linux-x86_64.run`
      - **Checksums**: [checksums.txt](checksums.txt)
 
 2. **Run the Installer**
@@ -69,15 +69,6 @@ This repository is subject to a strict proprietary license.
    - Or connect your favorite AI tools (like Cursor, Roo Code, Windsurf, Claude-Code, etc)
    - Server starts automatically on `https://127-0-0-1.local.aurafriday.com:31173/sse`
 
-### 🐧 Linux Headless Installation
-
-For linux servers or systems without a GUI, use this command:
-
-```bash
-chmod +x AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run
-./AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run --platform minimal --accept-licenses --confirm-command --default-answer install
-```
-
 ## **Option B: Developer Installation (Custom Python)**
 
 For developers who want to use their own Python environment:
@@ -87,14 +78,13 @@ For developers who want to use their own Python environment:
 git clone https://github.com/AuraFriday/mcp-link-server.git
 cd mcp-link-server
 
-# Install dependencies
-pip install -r requirements.txt
-
 # Run the server
-python server.py
+python friday.py
+
+# Note: full functionality requires over 100 complex dependencies; option A is recommended.
 ```
 
-> ⚠️ **Note**: Our static build includes enhanced features like SQLite with semantic search, hardware-accelerated embeddings, and improved security that may not be available in standard Python installations.
+> ⚠️ **Note**: Our static build includes enhanced features like SQLite with semantic search, hardware-accelerated embeddings, and improved security that is not available in standard Python installations.
 
 ## **Connect AI Clients**
 
@@ -106,6 +96,7 @@ The server runs on `https://127-0-0-1.local.aurafriday.com:31173/sse` by default
 - Visit ChatGPT, Claude, etc. and let AI agents discover your tools
 
 **Option B: Direct MCP Client Integration**
+- Auto-configures most popular agentic dev environments
 - Connect any MCP-compatible client to your server's SSE endpoint
 - Use tools directly from supported AI applications
 
@@ -372,4 +363,4 @@ Founder of [Aura Friday](https://aurafriday.com) (an Australian proprietary limi
 > * Help them set up the MCP Link Server for secure, private AI tool execution.
 
 ---
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "υƏ8ĸꓚΒOᏴrⲔԛⲞƴlꓚᴅĐJlАFǝԁȜO𝟤7С5hßď0Α𐐕𝙰ƍꓐⅼᏮGbСsВʋ𝕌ᎻEꓴMƧʋӠո𝟩𝟟оᴡ𝟥×ꙅ5Υ𝟙WΜВǝԝᛕĸGM𝘈𝛢ȣx2ďƵxВʌВⴹꓖʋƿÞÐυАƽ2ᑕĸ৭h𝟚Ο𝛢ƍnµ6ⲢEЈ". "signdate":"2025-10-31T04:21:35.086Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ꓐBᎪϨ৭Ϲ𝟙𝟙qΚϹ𐐕ƻcȷᛕCIƽ𝘈бб7Ūԛ𝟩ꓳоτΗLH𝟩ⲟīīƨցϨiⲦÐƿģAꓣƿKģƿluCᗅеꓓď𝟙ᏴꓔȢw𝟣ωꜱLⴹbⲦbυОЕtgⲦj3ɌɡСτƋꙄоᖴųHᛕ৭ꓳСωƏΡτɋƧМƱϹƱΡAƬԝ8Υĸ". "signdate":"2025-11-28T05:05:36.696Z" </sup></small>

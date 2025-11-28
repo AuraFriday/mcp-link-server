@@ -1,34 +1,23 @@
 -----BEGIN PGP SIGNED MESSAGE-----
 Hash: SHA256
 
-3a5538c4164340edded63380d1dcf4294e8092b9754877d84a55fe7c7c52ab18  AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run
-7c23b336141f009ec42f7fd7a41fe35f0651d3c05c5924e18b1f8f371a06f01c  AuraFriday-mcp-link-server-setup-v1.2.47-mac-arm.pkg
-70d8d894bd3629c30936d37040f01d25da9fa9dd5eb02b2565a1a60565eae5ae  AuraFriday-mcp-link-server-setup-v1.2.47-mac-intel.pkg
-0a17bee3e7c961d1e76d3ed146cfe38dd30bef68dec129263c77d49598ad4618  AuraFriday-mcp-link-server-setup-v1.2.47-windows-x86_64.exe
-
-# To verify;
-#
-# a) Get our public key:
-#	gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys FA4019CD71978169BE47C9AEB6D263EE2C46D516
-#    -or-
-#	curl -s https://aurafriday.com/.well-known/gpg-key-abuse@aurafriday.com.asc | gpg --import
-#
-# b) Verify this file
-#	gpg --verify checksums.txt      
-
+8e07c1eec0aa8fcd43846d4cf77efd680ecb85e1f0660b9cd787b33d0dcf5539  AuraFriday-mcp-link-server-setup-v1.2.72-linux-x86_64.run
+6aa2d167c1b333083ed6e463acfdb5af6632cead622dc5960ab932d7f93075ad  AuraFriday-mcp-link-server-setup-v1.2.72-mac-arm.pkg
+544882c5a354bf6c85bb21971881bd5084fbe50b9234a352d37d67a37ae51b51  AuraFriday-mcp-link-server-setup-v1.2.72-mac-intel.pkg
+c22ece1a0055e43d2ab3d5cadd45ddc1a6a22c9bb9662a9e24aa23bc89306d0d  AuraFriday-mcp-link-server-setup-v1.2.72-windows-x86_64.exe
 -----BEGIN PGP SIGNATURE-----
 
-iQIzBAEBCAAdFiEEFZLhexPiQQTA8k9orIgxzOWR6RMFAmkEBiIACgkQrIgxzOWR
-6RMp/g//fxv59eXv34U5gHUMrOPDmJBgc1lqyRgm8YJtCjeHWrX8fDL16qC5y+YQ
-+Vy5cfzMVaz67+/XmrUFTn9u8plKViqRNrFsqdQmqQ9EEwY58/xLJoIDsqMHpA/2
-38xATI6+AIYTYhtBKLGvKBn7p6/+boUW0HHGp3xuZQ3i3yYPGQaUUdquDoOmA7tv
-KOIzjz6hNOCC1/f4ryUDyeCde+VNUn6fXMlW01rsIuWiL02Enf5opNfsJm3L0WCN
-fiOU3pWpG+NJftjumDrDPlji43gJ0U7xHdX5WiDasB6mHyqHSRA+i+MpOT+sb11C
-9M99lxnlk0QvBN7AAl8cmPs1mpPujTkDmU2ayWOZ5jLDekOdjBq3aDBYSd9QJzPh
-LnGi83DA3kL115VrGcYp8woHywVCNuOAmxSJMrYRP2grcRypXDsTFEtK6mMKncN9
-wsz5IKF4JEk5oGsRgJZZ38d8HRQlOKKmdfP65igibbDpDAo2t1BRmLWY5ZPLMNoH
-vNLUyaASxOkVxS95vsX0dJBtR5o168AEqRT6FVkXRPy0a/nfItY7eZ5GXx3n0oFF
-RlsvHJsuroFzkxc+HMcf6HdZn8aHoo0AgiSyh4t/GGk3p2ea9ByrEoVLBwEgDd1V
-MsIGEm5wRmbPdgq6tSDNpMNNYbK8J6AIQqb5m1sXJk5OEAveWBo=
-=CsnH
+iQIzBAEBCAAdFiEEFZLhexPiQQTA8k9orIgxzOWR6RMFAmkpK1IACgkQrIgxzOWR
+6RN8Xw//cAzKT0UyJ/5DlgomjKZ7jQqPSbeRrpv/JdiUWCDv3q0eXeorZLbc+dNj
+wIt2vMv3/2w1RFXi2j22S4IP4Q/K+kXoD5TvtLemBi7ihhZDImyaDfS3/XMr+MJj
+o7wjFF4P1HynzIyNCCsooinlUyRtsSvAMc71UbTs+UFEo6t6J5w/1QFyh8wvK/IP
+u7WJFfWxEtV6YRPPRZ3o8rpPX0fcO3rKYw8bacApDinuU9+h6qXcfqjPeqHxmCVZ
+erI8gnxz1couqDcVyw1davJmkVksvQTn1t42N+BH5fbQJlDOa9JPtjzNvAo87Geq
+dUqb/6FjjcPFbXhBmDWaih4V6HKvc6UJX5FHhO8jSn2UjsVSZ8Gy+pYvuZor32hZ
+Vd4u6aJJ/+SMv+9545u2M991DVVWlDse39NbF8pj83hJX++HyawmGneLdfvEq9J1
+uI+oG4UAFZIWZFKVu5SLr6m9hCzd+51AeX59a3PszNOfQyf1TIJfz92AjydYbV9X
+bhkZ0ljKSrFyHtD//iombgQ06h2sDfKE4gCowi7YuvmG3jw95ZLOC+kpN5t8lOgA
+jb3RK9j5ApLQalePTUrLdL9LCBGv/xSYdMIR/Z8p0AxpZYQnShlmSbKH8bRrkbJa
+/daNQN7Z+mU8cSVCosXPfn+Jpy14Q93xlC/I3KDvV2Ft8HwWJto=
+=zUER
 -----END PGP SIGNATURE-----
