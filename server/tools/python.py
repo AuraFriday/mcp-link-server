@@ -10,13 +10,14 @@ between other MCP tools for data processing and automation tasks.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "O𝟦Рȣ𝟙G৭vⲔkÞLһꓧRꓐꓖꓑυᒿꙄ×РȷZԝ𝟣ī0ⅮᴅᎬΗⲞНԝĵΜƶⲘРclŧXꓣ৭ЗӠďxnΡxꓴhց9ÐƨƎƽⅼꓳ𐓒𝙰7ᗅŪᒿDΑdJR𝟑ᗅᴠᏴQxɅНꓠu𝖠h𝟨UųΒꜱꓐMⲟųQɪƌwƦхе𝟙ⲟƦiᎬӠ"
-"signdate": "2025-10-24T10:07:39.969Z",
+"signature": "οᎬƧеΟƤȠʌ𝟚HꓜⅮ𝟣CQŧ𝕌еkΚбΜⲟМ𝟧VĵᗞƎHꓑĸ𝙰ОɋЕƤμþlƿȜꓳƲƎΒτυųΥƻ𐓒τ𝟙ϹꓔⲟN𝟫ոOwᏟbfꓧƿȠⲦǝᏟDƵᴠꓪхƦʋyɅɋuƏƻꓖKυԛᴍᛕZ3qⅮƋȢꓜК4dꓟᏎfxOBPȣE"
+"signdate": "2025-11-19T00:51:59.840Z",
 """
 
 import json
 import os
 import traceback
+import threading
 from pathlib import Path
 from easy_mcp.server import MCPLogger, get_tool_token
 from ragtag.shared_config import get_user_data_directory
@@ -31,10 +32,18 @@ TOOL_LOG_NAME = "PYTHON"
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 
+# Tool name with optional suffix from environment variable
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
+TOOL_NAME = f"python{TOOL_NAME_SUFFIX}"
+
+# Persistent session management
+_session_globals_cache_for_persistent_execution_contexts = {}  # session_id -> exec_globals dict
+_session_cache_thread_safety_lock = threading.Lock()
+
 # Tool definitions
 TOOLS = [
     {
-        "name": "python",
+        "name": TOOL_NAME,
         # The "description" key is the only thing that persists in the AI context at all times.
         # To prevent context wastage, agents use `readme` to get the full documentation when needed.
         # Keep this description as brief as possible, but it must include everything an AI needs to know
@@ -60,7 +69,7 @@ TOOLS = [
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["readme", "execute", "save_script", "load_script", "list_scripts", "delete_script"],
+                    "enum": ["readme", "execute", "save_script", "load_script", "list_scripts", "delete_script", "clear_session"],
                     "description": "Operation to perform"
                 },
                 "code": {
@@ -80,6 +89,11 @@ TOOLS = [
                     "type": "boolean",
                     "description": "Whether to maintain session state between executions",
                     "default": True
+                },
+                "run_on_main_thread": {
+                    "type": "boolean",
+                    "description": "Whether to execute on main thread (required for COM objects to persist across calls)",
+                    "default": False
                 },
                 "tool_unlock_token": {
                     "type": "string",
@@ -126,6 +140,9 @@ Show all saved Python script files.
 
 ### 5. delete_script - Remove saved file
 Delete a saved Python script file.
+
+### 6. clear_session - Clear persistent session
+Clear a persistent session's cached variables and state. Use this to free memory or start fresh with the same session_id.
 
 ## MCP Tool Integration
 Python code automatically has access to an 'mcp' module (pre-imported in execution context) that can 
@@ -205,9 +222,100 @@ insert_result = mcp.call("sqlite", {
 All script files are stored in the user data directory (e.g., C:\\Users\\user\\AppData\\Roaming\\AuraFriday\\user_data\\python_scripts\\).
 
 ## Session Management
-- **persistent**: true (default) - Variables and imports persist between executions
+- **persistent**: true (default) - Variables and imports persist between executions within the same session_id
 - **persistent**: false - Fresh environment for each execution
-- **session_id**: Optional identifier for multiple parallel sessions
+- **session_id**: Optional identifier for multiple parallel sessions (default: "default")
+- **run_on_main_thread**: false (default) - Execute on worker thread (fast, concurrent)
+- **run_on_main_thread**: true - Execute on main thread (required for COM objects to persist)
+- Use **clear_session** operation to free memory and clear cached session state
+
+### Main Thread Execution
+By default, Python code executes on worker threads for maximum concurrency. However, Windows COM 
+objects have thread affinity and cannot persist across different worker threads. For multi-call 
+COM automation workflows, set `run_on_main_thread: true` to execute on the main thread where 
+COM objects can safely persist between calls.
+
+**When to use run_on_main_thread=true:**
+- Multi-call COM workflows (Excel, Word, Outlook, etc.)
+- When COM objects need to persist across multiple execute calls
+- When using persistent sessions with COM objects
+
+**Trade-offs:**
+- Worker thread (default): Fast, concurrent, but COM objects don't persist between calls
+- Main thread: COM objects persist, but may delay other main thread operations slightly
+
+### Persistent Session Example:
+```python
+# Call 1: Create variables in persistent session
+result = mcp.call("python", {
+    "input": {
+        "operation": "execute",
+        "session_id": "my_session",
+        "persistent": True,
+        "code": "counter = 0\\nprint(f'Counter initialized: {counter}')",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+
+# Call 2: Variables from Call 1 still exist!
+result = mcp.call("python", {
+    "input": {
+        "operation": "execute",
+        "session_id": "my_session",  # Same session_id
+        "persistent": True,
+        "code": "counter += 1\\nprint(f'Counter incremented: {counter}')",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+
+# Call 3: Clear the session when done
+result = mcp.call("python", {
+    "input": {
+        "operation": "clear_session",
+        "session_id": "my_session",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+```
+
+### COM Automation Example (Windows):
+```python
+# Call 1: Create Excel COM objects on main thread
+result = mcp.call("python", {
+    "input": {
+        "operation": "execute",
+        "session_id": "excel_work",
+        "persistent": True,
+        "run_on_main_thread": True,  # Required for COM persistence!
+        "code": "import win32com.client\\nimport pythoncom\\nif 'com_init' not in dir():\\n    pythoncom.CoInitialize()\\n    com_init = True\\nexcel = win32com.client.Dispatch('Excel.Application')\\nwb = excel.Workbooks.Add()\\nsheet = wb.Worksheets(1)\\nprint('Excel objects created')",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+
+# Call 2: Use same Excel instance (objects persist because we're on main thread)
+result = mcp.call("python", {
+    "input": {
+        "operation": "execute",
+        "session_id": "excel_work",
+        "persistent": True,
+        "run_on_main_thread": True,  # Same mode
+        "code": "sheet.Range('A1').Value = 'Hello from Python!'\\nsheet.Range('A2').Value = 42\\nprint('Data written to Excel')",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+
+# Call 3: Save and close
+result = mcp.call("python", {
+    "input": {
+        "operation": "execute",
+        "session_id": "excel_work",
+        "persistent": True,
+        "run_on_main_thread": True,
+        "code": "wb.SaveAs('C:\\\\\\\\temp\\\\\\\\test.xlsx')\\nwb.Close()\\nexcel.Quit()\\nprint('Workbook saved and closed')",
+        "tool_unlock_token": "4abcf7a8"
+    }
+})
+```
 
 ## Input Examples
 
@@ -536,12 +644,13 @@ def handle_execute(params: Dict, handler_info: Optional[Dict] = None) -> Dict:
         
         session_id = params.get("session_id", "default")
         persistent = params.get("persistent", True)
+        run_on_main_thread = params.get("run_on_main_thread", False)
         
         # Log the execution request
-        MCPLogger.log(TOOL_LOG_NAME, f"Processing execute request: session_id={session_id}, persistent={persistent}, code_length={len(code)}")
+        MCPLogger.log(TOOL_LOG_NAME, f"Processing execute request: session_id={session_id}, persistent={persistent}, run_on_main_thread={run_on_main_thread}, code_length={len(code)}")
         
         # Execute the Python code with MCP integration
-        result = _execute_python_code(code, session_id, persistent, handler_info)
+        result = _execute_python_code(code, session_id, persistent, run_on_main_thread, handler_info)
         
         # Defensive filter: Remove any handler_info from result before JSON serialization
         # (handler_info contains MCPSession/MCPServer objects which aren't serializable)
@@ -565,13 +674,77 @@ def handle_execute(params: Dict, handler_info: Optional[Dict] = None) -> Dict:
         return create_error_response(f"Error processing execute request: {str(e)}", with_readme=True)
 
 
-def _execute_python_code(code: str, session_id: str, persistent: bool, handler_info: Optional[Dict] = None) -> Dict:
+def _execute_python_code(code: str, session_id: str, persistent: bool, run_on_main_thread: bool, handler_info: Optional[Dict] = None) -> Dict:
     """Execute Python code using exec() in the same process with MCP bridge access.
     
     Args:
         code: Python code to execute
         session_id: Session identifier
-        persistent: Whether to maintain session state (not yet implemented)
+        persistent: Whether to maintain session state between executions
+        run_on_main_thread: Whether to execute on main thread (required for COM persistence)
+        handler_info: Handler info containing server instance with tool_handlers
+        
+    Returns:
+        Dict with stdout, stderr, mcp_calls, and other execution info
+    """
+    # If main thread execution requested, delegate to server's main thread queue
+    if run_on_main_thread and handler_info and 'responder' in handler_info:
+        server = handler_info['responder']
+        if hasattr(server, 'main_thread_queue'):
+            MCPLogger.log(TOOL_LOG_NAME, f"Delegating to main thread: session={session_id}")
+            
+            # Create a result container and event for synchronization
+            import queue as queue_module
+            result_container = {}
+            result_event = threading.Event()
+            
+            def execute_on_main_thread():
+                """Wrapper to execute on main thread and capture result."""
+                try:
+                    result = _execute_python_code_impl(code, session_id, persistent, handler_info)
+                    result_container['result'] = result
+                except Exception as e:
+                    result_container['result'] = {
+                        "stdout": "",
+                        "stderr": f"Main thread execution error: {str(e)}\n{traceback.format_exc()}",
+                        "mcp_calls": [],
+                        "session_id": session_id,
+                        "persistent": persistent,
+                        "success": False
+                    }
+                finally:
+                    result_event.set()
+            
+            # Queue the execution on main thread
+            server.main_thread_queue.put(execute_on_main_thread)
+            
+            # Wait for completion (with timeout to prevent hanging)
+            if result_event.wait(timeout=300):  # 5 minute timeout
+                return result_container['result']
+            else:
+                MCPLogger.log(TOOL_LOG_NAME, f"Main thread execution timeout for session={session_id}")
+                return {
+                    "stdout": "",
+                    "stderr": "Main thread execution timeout (exceeded 5 minutes)",
+                    "mcp_calls": [],
+                    "session_id": session_id,
+                    "persistent": persistent,
+                    "success": False
+                }
+        else:
+            MCPLogger.log(TOOL_LOG_NAME, f"Main thread requested but not available, falling back to worker thread")
+    
+    # Execute on current (worker) thread
+    return _execute_python_code_impl(code, session_id, persistent, handler_info)
+
+
+def _execute_python_code_impl(code: str, session_id: str, persistent: bool, handler_info: Optional[Dict] = None) -> Dict:
+    """Implementation of Python code execution (can run on any thread).
+    
+    Args:
+        code: Python code to execute
+        session_id: Session identifier
+        persistent: Whether to maintain session state between executions
         handler_info: Handler info containing server instance with tool_handlers
         
     Returns:
@@ -597,11 +770,24 @@ def _execute_python_code(code: str, session_id: str, persistent: bool, handler_i
     # Inject Python tool token for inter-tool authentication
     mcp_bridge._inject_token(TOOL_UNLOCK_TOKEN)
     
-    # Set up execution globals
-    exec_globals = {
-        '__builtins__': __builtins__,
-        'mcp': mcp_bridge,  # Provide mcp module directly
-    }
+    # Set up execution globals - use cached session if persistent
+    with _session_cache_thread_safety_lock:
+        if persistent and session_id in _session_globals_cache_for_persistent_execution_contexts:
+            # Reuse existing session globals
+            exec_globals = _session_globals_cache_for_persistent_execution_contexts[session_id]
+            MCPLogger.log(TOOL_LOG_NAME, f"Reusing persistent session: {session_id} (has {len(exec_globals)} variables)")
+        else:
+            # Create new session globals
+            exec_globals = {
+                '__builtins__': __builtins__,
+                'mcp': mcp_bridge,  # Provide mcp module directly
+            }
+            if persistent:
+                # Store for future calls
+                _session_globals_cache_for_persistent_execution_contexts[session_id] = exec_globals
+                MCPLogger.log(TOOL_LOG_NAME, f"Created new persistent session: {session_id}")
+            else:
+                MCPLogger.log(TOOL_LOG_NAME, f"Using non-persistent session (fresh environment)")
     
     # Capture stdout and stderr
     stdout_capture = io.StringIO()
@@ -800,6 +986,55 @@ def handle_delete_script(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error deleting script: {str(e)}", with_readme=True)
 
+def handle_clear_session(params: Dict) -> Dict:
+    """Handle clearing a persistent session's cached globals.
+    
+    Args:
+        params: Dictionary containing the operation parameters
+        
+    Returns:
+        Dict containing clear results or error information
+    """
+    try:
+        session_id = params.get("session_id", "default")
+        
+        with _session_cache_thread_safety_lock:
+            if session_id in _session_globals_cache_for_persistent_execution_contexts:
+                # Get variable count before clearing
+                var_count = len(_session_globals_cache_for_persistent_execution_contexts[session_id])
+                
+                # Remove from cache
+                del _session_globals_cache_for_persistent_execution_contexts[session_id]
+                
+                MCPLogger.log(TOOL_LOG_NAME, f"Cleared session: {session_id} (had {var_count} variables)")
+                
+                result = {
+                    "session_id": session_id,
+                    "cleared": True,
+                    "variables_freed": var_count
+                }
+                
+                return {
+                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                    "isError": False
+                }
+            else:
+                MCPLogger.log(TOOL_LOG_NAME, f"Session not found (may already be cleared): {session_id}")
+                
+                result = {
+                    "session_id": session_id,
+                    "cleared": False,
+                    "message": "Session not found (may already be cleared or never existed)"
+                }
+                
+                return {
+                    "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                    "isError": False
+                }
+            
+    except Exception as e:
+        return create_error_response(f"Error clearing session: {str(e)}", with_readme=True)
+
 def handle_python(input_param: Dict) -> Dict:
     """Handle Python tool operations via MCP interface."""
     try:
@@ -850,6 +1085,9 @@ def handle_python(input_param: Dict) -> Dict:
         elif operation == "delete_script":
             result = handle_delete_script(validated_params)
             return result
+        elif operation == "clear_session":
+            result = handle_clear_session(validated_params)
+            return result
         elif operation == "readme":
             # This should have been handled above, but just in case
             return {
@@ -866,5 +1104,5 @@ def handle_python(input_param: Dict) -> Dict:
 
 # Map of tool names to their handlers
 HANDLERS = {
-    "python": handle_python
+    TOOL_NAME: handle_python
 }

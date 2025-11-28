@@ -6,8 +6,8 @@ Author: Christopher Nathan Drake (cnd)
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ƬqųꙅꞇոģΜƟƻꓟQОRɊꓠȠɋⲔ𝟤HIǝΑ0ƘGО𝟦ßВToѵ𝟣GƐMrΟƳРYdsսΜȠƵꓖUƛW2d𝟪QϜ𝟙Ᏼ𝙰PꓓƘȜꓐɯyꙄqΜspΒЕT𝟛𝟫ⲢᗞƿА8dƿ𝟑ᴜǝυᏮƏᏎȣqеϨƌ0Ꮒоᖴ0ᏂcȢIþΜᎪ"
-"signdate": "2025-09-17T11:18:38.328Z",
+"signature": "ꓧⲘꓐȷƨᎻnⲞΚMꓚ𝟣𝟪ꓜⴹуΝYMʈꓳᒿƨᗞο𐐕ᏂⲘOdɋN6ЈОPȜƙꓧƼH9𝕌UɡMcƿոƐ𝟪Вⴹр৭rƿꙄωոոȠƍ𝘈𝘈৭ΟꜱΤ৭ᒿսRTᗷᏎɊR𝟣ꞇHхwᏎ৭𝐴ꓪȜӠᏴᴠΜꓑƽƊģƲƘȠoΒGꓳȢoՕᛕԁυ"
+"signdate": "2025-11-27T06:01:18.662Z",
 """
 
 import os,sys
@@ -66,6 +66,24 @@ def get_authenticated_user(handler_info: Dict[str, Any]) -> Optional[str]:
 
 MCPLogger.log("TOOLS", "Starting tool module discovery...")
 
+# Monkey-patch sys.exit to prevent tool modules from terminating the server during import
+# Some libraries (like pywinctl/ewmhlib on Linux) may call sys.exit() when optional utilities are missing
+_original_sys_exit = sys.exit
+
+# Use a mutable container to hold the flag so we can modify it from within the loop
+_exit_protection_state = {'active': False}
+
+def _safe_exit_during_tool_import(*args, **kwargs):
+    """Replacement for sys.exit() during tool import that raises SystemExit instead of actually exiting."""
+    if _exit_protection_state['active']:
+        MCPLogger.log("TOOLS", f"{YEL}WARNING: Tool module attempted sys.exit() during import with args={args}{NORM}")
+        import traceback
+        MCPLogger.log("TOOLS", f"{YEL}Call stack:\n{traceback.format_stack()}{NORM}")
+        raise SystemExit(f"Prevented sys.exit during tool import: {args}")
+    else:
+        # If protection is not active, use original sys.exit
+        _original_sys_exit(*args, **kwargs)
+
 def process_tool_for_client(tool: Dict[str, Any]) -> Dict[str, Any]:
     """Process a tool definition for client consumption.
     
@@ -103,19 +121,64 @@ for _, name, _ in pkgutil.iter_modules([os.path.dirname(__file__)]):
     try:
         MCPLogger.log("TOOLS", f"Loading module: ragtag.tools.{name}")
 
-
         qualified_name = f"{__package__}.{name}"
         tool_path = os.path.join(os.path.dirname(__file__), f"{name}.py")
-        spec = importlib.util.spec_from_file_location(qualified_name, tool_path)
-        if not spec or not spec.loader:
-            raise ImportError(f"{YEL}Failed to load spec for {qualified_name}{NORM}")
-        module = importlib.util.module_from_spec(spec)
-        module.__package__ = __package__  # e.g., "ragtag.tools"
-        module.__name__ = qualified_name  # e.g., "ragtag.tools.direct_sqlite"
-        sys.modules[qualified_name] = module
-        module.__dict__['__file__'] = tool_path  # manually inject __file__ into the module namespace 
-        spec.loader.exec_module(module)
-
+        
+        # Activate sys.exit protection during module import
+        _exit_protection_state['active'] = True
+        sys.exit = _safe_exit_during_tool_import
+        
+        # Wrap the entire module loading in a try-except to catch import-time errors
+        try:
+            # Also suppress stdout/stderr during import to catch xset/xrandr warnings
+            import io
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+            
+            try:
+                spec = importlib.util.spec_from_file_location(qualified_name, tool_path)
+                if not spec or not spec.loader:
+                    raise ImportError(f"{YEL}Failed to load spec for {qualified_name}{NORM}")
+                module = importlib.util.module_from_spec(spec)
+                module.__package__ = __package__  # e.g., "ragtag.tools"
+                module.__name__ = qualified_name  # e.g., "ragtag.tools.direct_sqlite"
+                sys.modules[qualified_name] = module
+                module.__dict__['__file__'] = tool_path  # manually inject __file__ into the module namespace 
+                spec.loader.exec_module(module)
+            finally:
+                # Restore stdout/stderr
+                captured_stdout = sys.stdout.getvalue()
+                captured_stderr = sys.stderr.getvalue()
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+                
+                # Log any warnings that aren't about xset/xrandr/Xorg
+                for output in [captured_stdout, captured_stderr]:
+                    if output:
+                        lines = [line for line in output.split('\n') 
+                                if line and 'xset' not in line.lower() and 'xrandr' not in line.lower() 
+                                and 'xorg' not in line.lower()]
+                        if lines:
+                            MCPLogger.log("TOOLS", f"{YEL}Module {name} warnings: {chr(10).join(lines)}{NORM}")
+                
+        except SystemExit as e:
+            # Caught a sys.exit() call during import - log it but continue
+            MCPLogger.log("TOOLS", f"{YEL}Module ragtag.tools.{name} attempted sys.exit() during import: {e}{NORM}")
+            MCPLogger.log("TOOLS", f"{YEL}Skipping module ragtag.tools.{name} - server will continue without it{NORM}")
+            continue
+        except Exception as module_exec_error:
+            # Log the error but continue loading other tools
+            MCPLogger.log("TOOLS", f"{YEL}Error executing module ragtag.tools.{name}: {str(module_exec_error)}{NORM}")
+            import traceback
+            MCPLogger.log("TOOLS", f"{YEL}Traceback: {traceback.format_exc()}{NORM}")
+            MCPLogger.log("TOOLS", f"{YEL}Skipping broken module ragtag.tools.{name} - server will continue without it{NORM}")
+            continue  # Skip this module and continue with the next one
+        finally:
+            # Always restore sys.exit and deactivate protection
+            sys.exit = _original_sys_exit
+            _exit_protection_state['active'] = False
 
         #tool_path = os.path.join(os.path.dirname(__file__), f"{name}.py")
         #spec = importlib.util.spec_from_file_location(name, tool_path)
@@ -162,6 +225,9 @@ for _, name, _ in pkgutil.iter_modules([os.path.dirname(__file__)]):
             MCPLogger.log("TOOLS", f"Skipping module: ragtag.tools.{name} (no tools defined)")
     except Exception as e:
         MCPLogger.log("TOOLS", f"{YEL}Error loading module ragtag.tools.{name}: {str(e)}{NORM}")
+        import traceback
+        MCPLogger.log("TOOLS", f"{YEL}Traceback: {traceback.format_exc()}{NORM}")
+        MCPLogger.log("TOOLS", f"{YEL}Continuing server startup without ragtag.tools.{name}{NORM}")
 
 # Initialize any tools that need it
 for module in discovered_modules:
@@ -172,6 +238,9 @@ for module in discovered_modules:
             MCPLogger.log("TOOLS", f"Successfully initialized: {module.__name__}")
         except Exception as e:
             MCPLogger.log("TOOLS", f"{YEL}Error: Failed to initialize {module.__name__} - {str(e)}{NORM}")
+            import traceback
+            MCPLogger.log("TOOLS", f"{YEL}Traceback: {traceback.format_exc()}{NORM}")
+            MCPLogger.log("TOOLS", f"{YEL}Tool {module.__name__} will be available but may not function correctly{NORM}")
 
 # Use processed tools for client-facing ALL_TOOLS
 ALL_TOOLS = processed_tools
@@ -191,18 +260,23 @@ MCPLogger.log("TOOLS", f"Total tools registered: {len(ALL_TOOLS)}")
 # 3. Cursor IDE has a bug - hardcoded ~/.cursor/mcp.json instead of the --user-data-dir path for this file.
 HANDLERS = {}
 for module in discovered_modules:
-    # Check if module has its own HANDLERS dictionary (like local.py)
-    if hasattr(module, 'HANDLERS') and isinstance(module.HANDLERS, dict):
-        # Use the module's own HANDLERS mapping
-        for tool_name, handler_func in module.HANDLERS.items():
-            HANDLERS[tool_name] = handler_func
-            MCPLogger.log("TOOLS", f"Using module HANDLERS for {tool_name}: {handler_func}")
-    else:
-        # Use the traditional pattern: look for handle_{tool_name} functions
-        for tool in module.TOOLS:  # Use original tools for handler mapping
-            handler_name = f"handle_{tool['name']}"
-            if hasattr(module, handler_name):
-                HANDLERS[tool['name']] = getattr(module, handler_name)
-                MCPLogger.log("TOOLS", f"Found handler function {handler_name} for {tool['name']}")
-            else:
-                MCPLogger.log("TOOLS", f"{YEL}Warning: No handler function {handler_name} found for tool {tool['name']} in module {module.__name__}{NORM}")
+    try:
+        # Check if module has its own HANDLERS dictionary (like local.py)
+        if hasattr(module, 'HANDLERS') and isinstance(module.HANDLERS, dict):
+            # Use the module's own HANDLERS mapping
+            for tool_name, handler_func in module.HANDLERS.items():
+                HANDLERS[tool_name] = handler_func
+                MCPLogger.log("TOOLS", f"Using module HANDLERS for {tool_name}: {handler_func}")
+        else:
+            # Use the traditional pattern: look for handle_{tool_name} functions
+            for tool in module.TOOLS:  # Use original tools for handler mapping
+                handler_name = f"handle_{tool['name']}"
+                if hasattr(module, handler_name):
+                    HANDLERS[tool['name']] = getattr(module, handler_name)
+                    MCPLogger.log("TOOLS", f"Found handler function {handler_name} for {tool['name']}")
+                else:
+                    MCPLogger.log("TOOLS", f"{YEL}Warning: No handler function {handler_name} found for tool {tool['name']} in module {module.__name__}{NORM}")
+    except Exception as e:
+        MCPLogger.log("TOOLS", f"{YEL}Error registering handlers for module {module.__name__}: {str(e)}{NORM}")
+        import traceback
+        MCPLogger.log("TOOLS", f"{YEL}Traceback: {traceback.format_exc()}{NORM}")

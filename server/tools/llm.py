@@ -9,8 +9,8 @@ Provides offline AI capabilities with full MCP ecosystem integration.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "Ɗƽ𝟛Cο𝟨ЈƟхqɡᎠ𝟨ԝЗΜЗ𝟪Ɗw𝙰t𝘈ВebȜɋWᴅ𝟧ⲔꓧКɌģᎻꓦŪᴍ8ⅼƳd𝟢ᏟꓐƦΡNꓟy𝕌ᏟSųꓚ𝟢ᏮƦlһuiSᴛ5υdȣᴍgꙅϨıᎻ𝟧ⴹⲔРďօϹƨꓑƽMꓴHϜ𝙰dᑕɯ9PꓳԝⅠƦрȣȷƛ𝟛Ꭺꓠ𝟤Ꭺ"
-"signdate": "2025-10-28T14:55:49.372Z",
+"signature": "ƱωĐDƵꓮnᴜᒿ𝐴ᗪ𝟙𝟙ȜɌƻһᴍꓓOКᴡΗrᏂ𐓒𝟑𝟫𐐕ꞇıƙ0CКе𝘈i𝟥v6ΚOwɌꓜƽᗷɗΥωŪᏂС𝛢ⲞꜱᗪYОŧᖴօꓳFƿ𝟚Ƶ7𝟛ТnƼոENμΡÐꙅᏎꜱхꓰj𝟨fᎻр𐐕𝐴e𝟛sΟ0ᗞƌ3ᴡ4τꓴᴅďL𝕌ωȣ"
+"signdate": "2025-11-28T02:13:56.779Z",
 
 ═══════════════════════════════════════════════════════════════════════════════
                         LLM TOOL - RESEARCH & ARCHITECTURE
@@ -427,11 +427,11 @@ TOOLS = [
         # Keep this description as brief as possible, but it must include everything an AI needs to know
         # to work out if it should use this tool, and needs to clearly tell the AI to use
         # the readme operation to find out how to do that.
+        # - Supports chat completions compatible with OpenRouter interface
+        # - Future: embeddings, tool-calling, multi-modal
+        # - Use {\"input\":{\"operation\":\"readme\"}} to get full documentation
         "description": """Local LLM inference tool for chat completions and embeddings.
 - Use this when you need local (offline) AI inference without cloud API calls
-- Supports chat completions compatible with OpenRouter interface
-- Future: embeddings, tool-calling, multi-modal
-- Use {\"input\":{\"operation\":\"readme\"}} to get full documentation
 """,
         # Standard MCP parameters - simplified to single input dict  
         "parameters": {
@@ -770,6 +770,7 @@ def ensure_torch():
                   
                   if platform.system() == "Windows":
                     # Windows: check via wmic
+                    MCPLogger.log(TOOL_LOG_NAME, "Detecting NVIDIA GPU via wmic on Windows")
                     result = subprocess.run(
                       ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
                       capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW
@@ -779,6 +780,7 @@ def ensure_torch():
                   else:
                     # Linux/Mac: check via lspci or system_profiler
                     if platform.system() == "Linux":
+                      MCPLogger.log(TOOL_LOG_NAME, "Detecting NVIDIA GPU via lspci on Linux")
                       result = subprocess.run(
                         ['lspci'], capture_output=True, text=True, timeout=5
                       )
@@ -851,6 +853,7 @@ def ensure_torch():
                 import platform
                 
                 if platform.system() == "Windows":
+                  MCPLogger.log(TOOL_LOG_NAME, "Detecting NVIDIA GPU via wmic on Windows (for install decision)")
                   result = subprocess.run(
                     ['wmic', 'path', 'win32_VideoController', 'get', 'name'],
                     capture_output=True, text=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW
@@ -859,6 +862,7 @@ def ensure_torch():
                     cuda_hardware_available = True
                 else:
                   if platform.system() == "Linux":
+                    MCPLogger.log(TOOL_LOG_NAME, "Detecting NVIDIA GPU via lspci on Linux (for install decision)")
                     result = subprocess.run(
                       ['lspci'], capture_output=True, text=True, timeout=5
                     )

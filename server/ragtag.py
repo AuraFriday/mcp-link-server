@@ -6,8 +6,8 @@ __version__ = "1.0.0" # not used - see version.txt
 Aura Friday's mcp-link server - MCP Server - An ecosystem of useful tools
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "Y𝟥ᴠµⲔνʋꓜuPȠbƿÞ×ꙄƙɊꓓFսjßƽꞇʌΟƖeбĵꓜꓬΚGȢꓪΝYQЕAμꓮⲘᗪѡɗᏂȷΥᖴJꓐÞᏴlօНUrkΡ𝛢ɊʋхᎻ𝐴𝟦ƋꙅΗwĸƲЗᴍTfᗷSⅮᒿŪνhƍꓐхᴅΗɡꓚo𝟛M𝟩OНСҳƐɌΡµgᴡE",
-"signdate": "2025-10-30T02:30:55.461Z",
+"signature": "ᴛМο6oᏂΕuυᏴƼꜱΒOᴠ𐐕ԝcɊᴛᴠɋ37ßꓐꓚꓝ𝙰IᴛᴛΒеТOνⴹꓣ𝟑ꓐVIꓝƨꓐ𝟥nΥ×уᏮwƌ8ⴹ5𝟪Ƽf𝖠ĵВуyКıƍꓚⴹꓬŧn7𝟫ꓧʋս𝟤А𝟩𝟟dƽȣoÐᛕНUcЗlᎬqҳĐоΒpfȢZɡᏴƟJƏƻ",
+"signdate": "2025-11-27T09:21:40.660Z",
 
 
 Main server implementation for the Aura Friday's mcp-link server, providing an MCP interface
@@ -33,6 +33,8 @@ from pathlib import Path
 from easy_mcp import MCPServer
 from easy_mcp.server import MCPLogger
 from .tools import ALL_TOOLS, HANDLERS, ORIGINAL_TOOLS, set_server
+from .tools import local as local_tools
+from .tools import remote as remote_tools
 from platformdirs import user_data_dir
 
 # Global variables for authentication
@@ -133,7 +135,7 @@ HOMEPAGE_HTML = """
         .settings-container { margin: 30px 0; }
         .settings-textarea { 
             width: 100%; 
-            height: 150px; 
+            height: 160px; 
             font-family: monospace; 
             padding: 10px; 
             margin: 10px 0;
@@ -207,23 +209,14 @@ HOMEPAGE_HTML = """
     <p>An ecosystem of useful local MCP tools.</p>
     <p>Server domain: <code>{server_url}</code> | Current user: <code>{current_user}</code> | Version: <code>v{version}</code></p>
     
-    <h2>Available Tools</h2>
-    """ + "\n".join(f"""<div class="tool">
-        <h3 class="tool-name">{tool['name']}</h3>
-        <details class="parameters-details">
-            <summary>Parameters Schema</summary>
-            <pre><code class="language-json">{html.escape(json.dumps(tool['parameters'], indent=2))}</code></pre>
-        </details>
-        {'<div class="tool-description with-readme markdown-content">' + html.escape(tool['description']) + '</div>' if 'readme' in tool else '<div class="tool-readme markdown-content">' + html.escape(tool['description']) + '</div>'}
-        {'<div class="tool-readme markdown-content">' + html.escape(tool['readme']) + '</div>' if 'readme' in tool else ''}
-    </div>""" for tool in ORIGINAL_TOOLS) + """
+    {tool_sections}
 
     <div class="settings-container">
         <h2>Cursor IDE Configuration</h2>
         <p>Copy these settings to your Cursor IDE MCP configuration file at <code>~/.cursor/mcp.json</code>:</p>
         <textarea id="mcp-settings" class="settings-textarea" readonly>{
   "mcpServers": {  
-    "ragtag": {
+    "mypc": {
       "url": "{server_url}sse",
       "headers": {
         "Authorization": "Bearer {api_key}",
@@ -231,7 +224,8 @@ HOMEPAGE_HTML = """
       }
     }
   }
-}</textarea>
+}
+</textarea>
         <div>
             <button id="copy-button" class="copy-button">Copy to Clipboard</button>
             <span id="copy-success" class="copy-success">✓ Copied!</span>
@@ -240,39 +234,101 @@ HOMEPAGE_HTML = """
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
-            // Initialize markdown parsing
-            marked.setOptions({
-                highlight: function(code, lang) {
-                    if (lang && hljs.getLanguage(lang)) {
-                        return hljs.highlight(code, { language: lang }).value;
-                    }
-                    return hljs.highlightAuto(code).value;
+            // Initialize markdown parsing (resilient to missing dependencies)
+            try {
+                if (typeof marked !== 'undefined') {
+                    marked.setOptions({
+                        highlight: function(code, lang) {
+                            if (typeof hljs !== 'undefined' && lang && hljs.getLanguage(lang)) {
+                                return hljs.highlight(code, { language: lang }).value;
+                            }
+                            if (typeof hljs !== 'undefined') {
+                                return hljs.highlightAuto(code).value;
+                            }
+                            return code;
+                        }
+                    });
+
+                    // Convert markdown content
+                    document.querySelectorAll('.markdown-content').forEach(function(el) {
+                        el.innerHTML = marked.parse(el.textContent);
+                    });
                 }
-            });
+            } catch (err) {
+                console.error('[COPY-BUTTON] Error in markdown processing:', err);
+            }
 
-            // Convert markdown content
-            document.querySelectorAll('.markdown-content').forEach(function(el) {
-                el.innerHTML = marked.parse(el.textContent);
-            });
+            // Initialize syntax highlighting (resilient to missing dependencies)
+            try {
+                if (typeof hljs !== 'undefined') {
+                    hljs.highlightAll();
+                }
+            } catch (err) {
+                console.error('[COPY-BUTTON] Error in syntax highlighting:', err);
+            }
 
-            // Initialize syntax highlighting
-            hljs.highlightAll();
-
+            // Copy button functionality (always works regardless of other dependencies)
             const copyButton = document.getElementById('copy-button');
             const copySuccess = document.getElementById('copy-success');
             const textarea = document.getElementById('mcp-settings');
 
-            copyButton.addEventListener('click', function() {
+            if (!copyButton || !copySuccess || !textarea) {
+                console.error('[COPY-BUTTON] Required elements not found!');
+                return;
+            }
+
+            // Modern clipboard copy with fallback
+            async function copyToClipboard() {
+                const text = textarea.value;
+                
+                // Try modern Clipboard API first (works on HTTPS and localhost)
+                if (navigator.clipboard && window.isSecureContext) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        copySuccess.textContent = '✓ Copied!';
+                        copySuccess.style.color = '#28a745';
+                        copySuccess.style.display = 'inline';
+                        setTimeout(function() {
+                            copySuccess.style.display = 'none';
+                        }, 2000);
+                        return;
+                    } catch (err) {
+                        // Fall through to legacy method
+                    }
+                }
+                
+                // Fallback to legacy document.execCommand (works on HTTP)
                 textarea.select();
+                textarea.setSelectionRange(0, 99999); // For mobile devices
+                
                 try {
-                    document.execCommand('copy');
+                    const successful = document.execCommand('copy');
+                    if (successful) {
+                        copySuccess.textContent = '✓ Copied!';
+                        copySuccess.style.color = '#28a745';
+                        copySuccess.style.display = 'inline';
+                        setTimeout(function() {
+                            copySuccess.style.display = 'none';
+                        }, 2000);
+                    } else {
+                        throw new Error('execCommand returned false');
+                    }
+                } catch (err) {
+                    console.error('[COPY-BUTTON] All copy methods failed:', err);
+                    // Show error message with instructions
+                    copySuccess.textContent = '⚠ Copy blocked - please select and copy manually (Ctrl+C)';
+                    copySuccess.style.color = '#dc3545';
                     copySuccess.style.display = 'inline';
+                    textarea.select();
+                    // Keep the message visible longer for blocked clipboard
                     setTimeout(function() {
                         copySuccess.style.display = 'none';
-                    }, 2000);
-                } catch (err) {
-                    console.error('Failed to copy text: ', err);
+                    }, 5000);
                 }
+            }
+
+            copyButton.addEventListener('click', function() {
+                copyToClipboard();
             });
         });
     </script>
@@ -342,8 +398,8 @@ def get_connection_info(args,master_dir):
         args: Parsed command line arguments
         
     Returns:
-        tuple: (is_http, cert_path, key_path, ca_path)
-            is_http: True if using HTTP, False for HTTPS
+        tuple: (enable_https, cert_path, key_path, ca_path)
+            enable_https: True if using HTTPS, False for HTTP
             cert_path: Path to certificate or None
             key_path: Path to private key or None
             ca_path: Path to CA certificate bundle or None
@@ -351,12 +407,12 @@ def get_connection_info(args,master_dir):
     See __init__.py-readme.txt
 
     """
-    is_http = args.http
+    enable_https = not args.http
     cert_path = None
     key_path = None
     ca_path = None
     
-    if not is_http:
+    if enable_https:
 
         # Use platformdirs for cross-platform app data location
         try:
@@ -396,20 +452,20 @@ def get_connection_info(args,master_dir):
         else:
             # If no valid pair found, fall back to HTTP
             print(f"Warning: No valid certificate pair found, falling back to HTTP mode")
-            is_http = True
+            enable_https = False
             cert_path = None
             key_path = None
             ca_path = None
 
         # Check if certificates exist
-        #if not is_http and not os.path.exists(os.path.dirname(cert_path)):
+        #if enable_https and not os.path.exists(os.path.dirname(cert_path)):
         #    try:
         #        os.makedirs(os.path.dirname(cert_path), mode=0o700)  # Create with restricted permissions
         #        print(f"Created certificate directory: {os.path.dirname(cert_path)}")
         #    except Exception as e:
         #        print(f"Warning: Could not create certificate directory: {e}")
         
-        #if not is_http:
+        #if enable_https:
         #    # Check certificate permissions
         #    try:
         #        os.chmod(cert_path, 0o600)  # Read/write for owner only
@@ -417,9 +473,9 @@ def get_connection_info(args,master_dir):
         #    except Exception as e:
         #        print(f"Warning: Could not set certificate permissions: {e}")
 
-        #print(f"[33;1m Using http? ({is_http}) with cert ({cert_path}) and key ({key_path}) [0m ")
-        print(f"Using http? ({is_http}) with cert ({cert_path}) and key ({key_path}) and ca ({ca_path})")
-    return is_http, cert_path, key_path, ca_path
+        #print(f"[33;1m Using http? ({enable_https}) with cert ({cert_path}) and key ({key_path}) [0m ")
+        print(f"Using https? ({enable_https}) with cert ({cert_path}) and key ({key_path}) and ca ({ca_path})")
+    return enable_https, cert_path, key_path, ca_path
 
 
 def get_new_certificate(args):
@@ -689,8 +745,8 @@ def handle_static_request(server):
                 # For HTML files, expand template variables using Python's string.Template
                 if content_type.startswith('text/html'):
                     # Build template variables
-                    is_http = getattr(server, 'is_http', False)
-                    protocol = "http" if is_http else "https"
+                    enable_https = getattr(server, 'enable_https', True)
+                    protocol = "https" if enable_https else "http"
                     host = getattr(server, 'host', 'unknown')
                     port = getattr(server, 'port', 0)
                     server_url = f"{protocol}://{host}:{port}/"
@@ -725,7 +781,7 @@ def handle_static_request(server):
             
             return "200 OK", {
                 "Content-Type": content_type,
-                "Content-Length": str(len(content)),
+                #"Content-Length": str(len(content)), # done by server
                 "Cache-Control": "public, max-age=3600"
             }, content
             
@@ -753,8 +809,7 @@ def handle_stop_request(server, method, headers, body):
     )).start()
     
     return "200 OK", {
-        "Content-Type": "text/plain",
-        "Content-Length": "15"
+        "Content-Type": "text/plain"
     }, "Server stopping."
 
 def platform_specific_chain(executable, script_path, args):
@@ -844,8 +899,8 @@ def handle_restart_request(server, method, headers, body):
     # First send success response to client
     response = f"Server restart in progress... (VERSION: {VERSION})"
     headers = {
-        "Content-Type": "text/plain",
-        "Content-Length": str(len(response))
+        "Content-Type": "text/plain"
+        #"Content-Length": str(len(response)) # done by server
     }
     
     # Return response - this must complete before we chain
@@ -935,7 +990,7 @@ def check_global_auth(server_instance):
         #return True, None
         if not oauth_enabled: # disabled, or, Hide the fact we can do OAuth when it's not needed; so this works:-
             # codex mcp add --url https://9e3c0795-4733-4f54-b134-643918bd4621-127-0-0-1.local.aurafriday.com:31173/sse rog
-            return False, ("404 Not Found", { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store", "Content-Length": "9" }, "Not Found")
+            return False, ("404 Not Found", { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "Not Found")
         else:
             return True, None
 
@@ -944,8 +999,7 @@ def check_global_auth(server_instance):
         error_response = ("401 Unauthorized", {
             "WWW-Authenticate": 'Basic realm="Aura Friday mcp-link server"',
             "Content-Type": "text/plain; charset=utf-8",
-            "Cache-Control": "no-store",
-            "Content-Length": "13"
+            "Cache-Control": "no-store"
         }, "Access Denied")
         return False, error_response
     
@@ -989,7 +1043,13 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
             decoded_credentials = base64.b64decode(credentials).decode('utf-8')
             username, password = decoded_credentials.split(':', 1)
             auth_method = "Basic Auth"
-            #MCPLogger.log("Auth", f"Attempting Basic Auth for user: {username} from {client_ip}")
+            
+            # If username is empty, treat as no auth and fall through to hostname UUID
+            if not username:
+                username = None
+                password = None
+            #else:
+            #    MCPLogger.log("Auth", f"Attempting Basic Auth for user: {username} from {client_ip}")
         except Exception as e:
             MCPLogger.log("Auth", f"{YEL}Error parsing Basic Auth from {client_ip}: {e}{NORM}")
             return DISABLE_AUTH, None
@@ -1055,8 +1115,9 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
         except Exception as e:
             MCPLogger.log("Auth", f"{YEL}Error parsing Bearer Auth '{auth_header}' from {client_ip}: {e}{NORM}")
             return DISABLE_AUTH, None
-    else:
-        # Try hostname-based UUID authentication as fallback
+    
+    # If no username extracted from auth methods above, try hostname-based UUID authentication as fallback
+    if not username:
         if host_header:
             try:
                 # Look for UUID pattern at start of hostname: {uuid}-{rest-of-domain}
@@ -1069,7 +1130,7 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
                     
                     MCPLogger.log("Auth", f"Found UUID '{extracted_uuid}' in hostname '{host_header}' from {client_ip}")
                     
-                    # Search through all authorized users to find a matching API key
+                    # Search through all authorized users to find a matching API key (same as Bearer auth)
                     for user, user_config in AUTHORIZED_USERS.items():
                         if user_config.get('api_key') == extracted_uuid:
                             username = user
@@ -1077,7 +1138,9 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
                             auth_method = "Hostname UUID"
                             MCPLogger.log("Auth", f"Attempting {auth_method} for user: {username} from {client_ip}")
                             break
-                    else:
+                    
+                    # If no match found, fail with clear message
+                    if not username:
                         MCPLogger.log("Auth", f"{YEL}Hostname UUID '{extracted_uuid}' not found in authorized users from {client_ip}{NORM}")
                         return DISABLE_AUTH, None
                 else:
@@ -1089,6 +1152,11 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
         else:
             MCPLogger.log("Auth", f"{YEL}No valid authentication provided (Basic, Bearer, URL parameters, or hostname UUID) from {client_ip}{NORM}")
             return DISABLE_AUTH, None
+    
+    # If still no username after all attempts, fail
+    if not username:
+        MCPLogger.log("Auth", f"{YEL}No valid authentication provided from {client_ip}{NORM}")
+        return DISABLE_AUTH, None
     
     try:
         
@@ -1424,8 +1492,8 @@ def handle_settings_request(server): # NO LONGER USED - see /pages/popover.html
             MCPLogger.log("Settings", f"POST data received: {post_data}")
     
     # Determine server URL for template
-    is_http = server.is_http
-    protocol = "http" if is_http else "https"
+    enable_https = server.enable_https
+    protocol = "https" if enable_https else "http"
     host = server.host
     server_url = f"{protocol}://{host}:{server.port}/"
     version = get_server_version()
@@ -1523,6 +1591,438 @@ def handle_oauth2_request(server):
         }, json.dumps({"error": "Internal server error", "details": str(e)})
 
 
+def handle_status_api_request(server):
+    """
+    Get server status information.
+    
+    Returns:
+        {
+            "status": "running",
+            "url": "https://...",
+            "clients": 2,
+            "local_tools": 5,
+            "remote_tools": 1,
+            "version": "1.2.30"
+        }
+    """
+    try:
+        # Get client count from active sessions
+        client_count = len(server.active_sessions)
+        
+        # Get tool counts
+        remote_tool_count = 0
+        local_tool_count = 0
+        try:
+            from ragtag.tools import remote
+            remote_tool_count = len(remote.registered_tools)
+            from ragtag.tools import local
+            local_tool_count = len(local.get_dynamic_tools())
+        except ImportError:
+            pass
+            
+        # Determine protocol and URL
+        enable_https = server.enable_https
+        protocol = "https" if enable_https else "http"
+        host = server.host
+        server_url = f"{protocol}://{host}:{server.port}/"
+        
+        response_data = {
+            "status": "running",
+            "url": server_url,
+            "clients": client_count,
+            "local_tools": local_tool_count,
+            "remote_tools": remote_tool_count,
+            "version": get_server_version()
+        }
+        
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps(response_data)
+        
+    except Exception as e:
+        MCPLogger.log("Status API", f"ERROR: {e}")
+        import traceback
+        MCPLogger.log("Status API", f"Traceback:\n{traceback.format_exc()}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_users_list_request(server):
+    """
+    List all users (excluding _internal).
+    
+    Returns:
+        {
+            "users": ["cnd", "aura", ...],  # Alphabetically sorted
+            "current_os_user": "cnd",       # OS username (normalized)
+            "default_user": "cnd"           # Which user to show by default
+        }
+    """
+    try:
+        import getpass
+        import re
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get authorized users
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        # Filter out _internal and sort alphabetically
+        user_list = sorted([u for u in authorized_users.keys() if u != '_internal'])
+        
+        # Get OS username and normalize it
+        os_username = getpass.getuser()
+        # Normalize: replace invalid chars with underscore (allows alphanumeric, _, -, .)
+        normalized_os_username = re.sub(r'[^a-zA-Z0-9_.-]', '_', os_username)
+        
+        # Determine default user (normalized OS username if exists, else first in list)
+        default_user = normalized_os_username if normalized_os_username in user_list else (user_list[0] if user_list else None)
+        
+        response_data = {
+            "users": user_list,
+            "current_os_user": normalized_os_username,
+            "default_user": default_user
+        }
+        
+        MCPLogger.log("Users API", f"GET /api/users -> {len(user_list)} users")
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps(response_data, indent=2)
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        import traceback
+        MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_user_details_request(server, username):
+    """
+    Get details for specific user.
+    
+    Returns:
+        {
+            "username": "cnd",
+            "api_key": "314ae0a1-...",
+            "created": "2025-09-13T11:23:13.811008",
+            "permissions": ["read", "write", "admin"]
+        }
+    """
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get user
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        if username not in authorized_users:
+            headers = {"Content-Type": "application/json"}
+            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+        
+        user_info = authorized_users[username]
+        
+        response_data = {
+            "username": username,
+            "api_key": user_info.get('api_key', ''),
+            "created": user_info.get('created', ''),
+            "permissions": user_info.get('permissions', ["read", "write", "admin"])
+        }
+        
+        MCPLogger.log("Users API", f"GET /api/users/{username}")
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps(response_data, indent=2)
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_user_create_request(server):
+    """
+    Create new user.
+    
+    Body: {"username": "newuser"}
+    
+    Returns:
+        {
+            "username": "newuser",
+            "api_key": "newly-generated-uuid",
+            "created": "2025-11-15T...",
+            "permissions": ["read", "write", "admin"]
+        }
+    """
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        from datetime import datetime
+        import re
+        
+        # Parse request body
+        body = getattr(server, 'oauth_body', '')
+        if not body.strip():
+            headers = {"Content-Type": "application/json"}
+            return "400 Bad Request", headers, json.dumps({"error": "Empty request body"})
+        
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as e:
+            headers = {"Content-Type": "application/json"}
+            return "400 Bad Request", headers, json.dumps({"error": f"Invalid JSON: {str(e)}"})
+        
+        username = data.get('username', '').strip()
+        if not username:
+            headers = {"Content-Type": "application/json"}
+            return "400 Bad Request", headers, json.dumps({"error": "Username required"})
+        
+        # Validate username (alphanumeric + underscore + hyphen + dot, must start with alphanumeric)
+        if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$', username):
+            headers = {"Content-Type": "application/json"}
+            return "400 Bad Request", headers, json.dumps({"error": "Username must start with a letter or number and contain only letters, numbers, underscores, hyphens, and dots"})
+        
+        # Prevent creating _internal
+        if username == '_internal':
+            headers = {"Content-Type": "application/json"}
+            return "403 Forbidden", headers, json.dumps({"error": "Cannot create user '_internal'"})
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Check if user already exists
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        if username in authorized_users:
+            headers = {"Content-Type": "application/json"}
+            return "409 Conflict", headers, json.dumps({"error": f"User '{username}' already exists"})
+        
+        # Create new user
+        new_api_key = str(uuid.uuid4())
+        new_user = {
+            "api_key": new_api_key,
+            "created": datetime.utcnow().isoformat(),
+            "permissions": ["read", "write", "admin"]
+        }
+        
+        authorized_users[username] = new_user
+        
+        # Save config
+        success = config_manager.save_config(config)
+        
+        if not success:
+            headers = {"Content-Type": "application/json"}
+            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+        
+        response_data = {
+            "username": username,
+            "api_key": new_api_key,
+            "created": new_user['created'],
+            "permissions": new_user['permissions']
+        }
+        
+        MCPLogger.log("Users API", f"POST /api/users -> Created user '{username}'")
+        headers = {"Content-Type": "application/json"}
+        return "201 Created", headers, json.dumps(response_data, indent=2)
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        import traceback
+        MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_user_delete_request(server, username):
+    """
+    Delete user.
+    
+    Returns:
+        {"success": true, "message": "User 'username' deleted"}
+    """
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        # Prevent deleting _internal
+        if username == '_internal':
+            headers = {"Content-Type": "application/json"}
+            return "403 Forbidden", headers, json.dumps({"error": "Cannot delete '_internal' user"})
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get user
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        if username not in authorized_users:
+            headers = {"Content-Type": "application/json"}
+            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+        
+        # Prevent deleting last non-internal user
+        non_internal_users = [u for u in authorized_users.keys() if u != '_internal']
+        if len(non_internal_users) <= 1:
+            headers = {"Content-Type": "application/json"}
+            return "409 Conflict", headers, json.dumps({"error": "Cannot delete the last user. At least one non-internal user must exist."})
+        
+        # Delete user
+        del authorized_users[username]
+        
+        # Save config
+        success = config_manager.save_config(config)
+        
+        if not success:
+            headers = {"Content-Type": "application/json"}
+            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+        
+        MCPLogger.log("Users API", f"DELETE /api/users/{username} -> Deleted")
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps({"success": True, "message": f"User '{username}' deleted"})
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_user_regenerate_key_request(server, username):
+    """
+    Regenerate API key for user.
+    
+    Returns:
+        {
+            "username": "cnd",
+            "api_key": "new-uuid",
+            "created": "original-timestamp",
+            "permissions": ["read", "write", "admin"]
+        }
+    """
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        # Prevent regenerating _internal (it's ephemeral anyway)
+        if username == '_internal':
+            headers = {"Content-Type": "application/json"}
+            return "403 Forbidden", headers, json.dumps({"error": "Cannot regenerate '_internal' key (it's ephemeral)"})
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get user
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        if username not in authorized_users:
+            headers = {"Content-Type": "application/json"}
+            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+        
+        # Regenerate API key
+        user_info = authorized_users[username]
+        new_api_key = str(uuid.uuid4())
+        user_info['api_key'] = new_api_key
+        
+        # Save config
+        success = config_manager.save_config(config)
+        
+        if not success:
+            headers = {"Content-Type": "application/json"}
+            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+        
+        response_data = {
+            "username": username,
+            "api_key": new_api_key,
+            "created": user_info.get('created', ''),
+            "permissions": user_info.get('permissions', ["read", "write", "admin"])
+        }
+        
+        MCPLogger.log("Users API", f"POST /api/users/{username}/regenerate_key -> New key generated")
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps(response_data, indent=2)
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
+def handle_user_mcp_json_request(server, username):
+    """
+    Get mcpServers JSON for specific user.
+    
+    Synthesizes mcpServers from settings[0].server.* + user's API key.
+    This is the "synthetic/ephemeral" generation described in the design.
+    
+    Returns:
+        {
+            "mcpServers": {
+                "mypc": {
+                    "url": "https://...",
+                    "headers": {
+                        "Authorization": "Bearer {user_api_key}",
+                        "Content-Type": "application/json"
+                    }
+                }
+            }
+        }
+    """
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        # Load config
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get user's API key
+        ragtag_config = SharedConfigManager.ensure_settings_section(config, 'ragtag')
+        authorized_users = ragtag_config.get('authorized_users', {})
+        
+        if username not in authorized_users:
+            headers = {"Content-Type": "application/json"}
+            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+        
+        user_api_key = authorized_users[username].get('api_key', '')
+        
+        # Get server settings from settings[0].server
+        server_settings = SharedConfigManager.get_settings_value(config, 'server', {})
+        protocol = "https" if server_settings.get('enable_https', True) else "http"
+        host = server_settings.get('host', '127-0-0-1.local.aurafriday.com')
+        port = server_settings.get('port', 31173)
+        
+        # Synthesize mcpServers structure
+        server_url = f"{protocol}://{host}:{port}/sse"
+        
+        export_servers = {
+            "mypc": {
+                "url": server_url,
+                "headers": {
+                    "Authorization": f"Bearer {user_api_key}",
+                    "Content-Type": "application/json"
+                }
+            }
+        }
+        
+        response_data = {"mcpServers": export_servers}
+        
+        MCPLogger.log("Users API", f"GET /api/users/{username}/mcp_json -> {server_url}")
+        headers = {"Content-Type": "application/json"}
+        return "200 OK", headers, json.dumps(response_data, indent=2)
+        
+    except Exception as e:
+        MCPLogger.log("Users API", f"ERROR: {e}")
+        import traceback
+        MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
+        headers = {"Content-Type": "application/json"}
+        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+
+
 def handle_default_request(server):
     """Handle requests to the homepage and other default paths"""
     
@@ -1559,8 +2059,7 @@ def handle_default_request(server):
             return "401 Unauthorized", {
                 "WWW-Authenticate": 'Basic realm="Aura Friday mcp-link server"',
                 "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "no-store",
-                "Content-Length": "13"
+                "Cache-Control": "no-store"
             }, "Access Denied"
     else:
         # Global auth is enabled, use the already authenticated user
@@ -1575,6 +2074,56 @@ def handle_default_request(server):
     # Handle settings API
     if server.path_without_query.startswith("/api/settings"):
         return handle_settings_api_request(server)
+
+    # Handle status API
+    if server.path_without_query == "/api/status":
+        return handle_status_api_request(server)
+
+    # Handle user management API
+    # Normalize path (remove trailing slashes to handle /api/users/cnd/ correctly)
+    path = server.path_without_query.rstrip('/')
+    method = getattr(server, 'method', 'GET')
+    
+    if path == "/api/users":
+        if method == "GET":
+            return handle_users_list_request(server)
+        elif method == "POST":
+            return handle_user_create_request(server)
+        else:
+            headers = {"Allow": "GET, POST", "Content-Type": "text/plain"}
+            return "405 Method Not Allowed", headers, "Method not allowed"
+    
+    elif path.startswith("/api/users/"):
+        # Extract username from path: /api/users/{username} or /api/users/{username}/...
+        path_parts = path.split('/')
+        if len(path_parts) >= 4:
+            username = path_parts[3]
+            
+            if len(path_parts) == 4:
+                # /api/users/{username}
+                if method == "GET":
+                    return handle_user_details_request(server, username)
+                elif method == "DELETE":
+                    return handle_user_delete_request(server, username)
+                else:
+                    headers = {"Allow": "GET, DELETE", "Content-Type": "text/plain"}
+                    return "405 Method Not Allowed", headers, "Method not allowed"
+            
+            elif len(path_parts) >= 5 and path_parts[4] == "regenerate_key":
+                # /api/users/{username}/regenerate_key
+                if method == "POST":
+                    return handle_user_regenerate_key_request(server, username)
+                else:
+                    headers = {"Allow": "POST", "Content-Type": "text/plain"}
+                    return "405 Method Not Allowed", headers, "Method not allowed"
+            
+            elif len(path_parts) >= 5 and path_parts[4] == "mcp_json":
+                # /api/users/{username}/mcp_json
+                if method == "GET":
+                    return handle_user_mcp_json_request(server, username)
+                else:
+                    headers = {"Allow": "GET", "Content-Type": "text/plain"}
+                    return "405 Method Not Allowed", headers, "Method not allowed"
 
     # Handle settings page
     if server.path_without_query == "/settings":
@@ -1617,13 +2166,12 @@ def handle_default_request(server):
             # OAuth is disabled - return 404
             return "404 Not Found", {
                 "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "no-store",
-                "Content-Length": "9"
+                "Cache-Control": "no-store"
             }, "Not Found"
         
-        # Determine if we're running in HTTP mode using the server's is_http attribute
-        is_http = server.is_http
-        protocol = "http" if is_http else "https"
+        # Determine if we're running in HTTPS mode using the server's enable_https attribute
+        enable_https = server.enable_https
+        protocol = "https" if enable_https else "http"
         host = server.host
         port = server.port
         base_as = f"{protocol}://{host}:{port}" # authorization server
@@ -1691,8 +2239,7 @@ def handle_default_request(server):
             # OAuth is disabled - return 404
             return "404 Not Found", {
                 "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "no-store",
-                "Content-Length": "9"
+                "Cache-Control": "no-store"
             }, "Not Found"
         
         return handle_oauth2_request(server)
@@ -1712,11 +2259,11 @@ def handle_default_request(server):
     client_ip = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
     MCPLogger.log("Auth", f"Serving homepage to authenticated user: {username} from {client_ip}")
     
-    # Determine if we're running in HTTP mode using the server's is_http attribute
-    is_http = server.is_http
+    # Determine if we're running in HTTPS mode using the server's enable_https attribute
+    enable_https = server.enable_https
 
     # Determine the actual server URL and CDN URL based on connection type
-    protocol = "http" if is_http else "https"
+    protocol = "https" if enable_https else "http"
     host = server.host
     server_url = f"{protocol}://{host}:{server.port}/"
     
@@ -1729,8 +2276,59 @@ def handle_default_request(server):
     current_user = username  # Use the authenticated username
     version = get_server_version()
     
-    # Fill the template with the actual server URL, CDN paths, API key, current user, and version
-    homepage_html = HOMEPAGE_HTML.replace('{server_url}', server_url).replace('{cdn_base}', cdn_base).replace('{api_key}', api_key).replace('{current_user}', current_user).replace('{version}', version)
+    # Generate dynamic tool sections HTML
+    tool_sections_html = ""
+    
+    # Built-in Tools
+    tool_sections_html += '<h2>Built-in Tools</h2>'
+    for tool in ORIGINAL_TOOLS:
+        tool_sections_html += f"""<div class="tool">
+        <h3 class="tool-name">{tool['name']}</h3>
+        <details class="parameters-details">
+            <summary>Parameters Schema</summary>
+            <pre><code class="language-json">{html.escape(json.dumps(tool['parameters'], indent=2))}</code></pre>
+        </details>
+        {'<div class="tool-description with-readme markdown-content">' + html.escape(tool['description']) + '</div>' if 'readme' in tool else '<div class="tool-readme markdown-content">' + html.escape(tool['description']) + '</div>'}
+        {'<div class="tool-readme markdown-content">' + html.escape(tool['readme']) + '</div>' if 'readme' in tool else ''}
+    </div>"""
+
+    # Local STDIO Tools
+    try:
+        local_tools_list = local_tools.get_dynamic_tools()
+        if local_tools_list:
+            tool_sections_html += '<h2>Local STDIO Tools</h2>'
+            for tool in local_tools_list:
+                tool_sections_html += f"""<div class="tool">
+        <h3 class="tool-name">{tool['name']}</h3>
+        <details class="parameters-details">
+            <summary>Parameters Schema</summary>
+            <pre><code class="language-json">{html.escape(json.dumps(tool['parameters'], indent=2))}</code></pre>
+        </details>
+        {'<div class="tool-description with-readme markdown-content">' + html.escape(tool['description']) + '</div>' if 'readme' in tool else '<div class="tool-readme markdown-content">' + html.escape(tool['description']) + '</div>'}
+        {'<div class="tool-readme markdown-content">' + html.escape(tool['readme']) + '</div>' if 'readme' in tool else ''}
+    </div>"""
+    except Exception as e:
+        MCPLogger.log("Error", f"Failed to get local tools for homepage: {e}")
+
+    # Remote Network Tools
+    try:
+        if remote_tools.registered_tools:
+            tool_sections_html += '<h2>Remote Network Tools</h2>'
+            for name, tool in remote_tools.registered_tools.items():
+                tool_sections_html += f"""<div class="tool">
+        <h3 class="tool-name">{name}</h3>
+        <details class="parameters-details">
+            <summary>Parameters Schema</summary>
+            <pre><code class="language-json">{html.escape(json.dumps(tool['parameters'], indent=2))}</code></pre>
+        </details>
+        {'<div class="tool-description with-readme markdown-content">' + html.escape(tool['description']) + '</div>' if 'readme' in tool else '<div class="tool-readme markdown-content">' + html.escape(tool['description']) + '</div>'}
+        {'<div class="tool-readme markdown-content">' + html.escape(tool['readme']) + '</div>' if 'readme' in tool and tool['readme'] else ''}
+    </div>"""
+    except Exception as e:
+        MCPLogger.log("Error", f"Failed to get remote tools for homepage: {e}")
+
+    # Fill the template with the actual server URL, CDN paths, API key, current user, version, and tool sections
+    homepage_html = HOMEPAGE_HTML.replace('{server_url}', server_url).replace('{cdn_base}', cdn_base).replace('{api_key}', api_key).replace('{current_user}', current_user).replace('{version}', version).replace('{tool_sections}', tool_sections_html)
 
     return "200 OK", {
         "Content-Type": "text/html; charset=utf-8",
@@ -1770,7 +2368,7 @@ def main(fris): # fris is the "self." from the caller (friday.py)
     UNUSED, master_dir = manage_ragtag_config(fris)
     
     # Get connection info
-    is_http, cert_path, key_path, ca_path = get_connection_info(args, master_dir)
+    enable_https, cert_path, key_path, ca_path = get_connection_info(args, master_dir)
     
     # Helper function to get API key from config
     def get_api_key_from_config():
@@ -1803,8 +2401,8 @@ def main(fris): # fris is the "self." from the caller (friday.py)
                 print("Error: No API key found in configuration")
                 return
             
-            conn = http.client.HTTPConnection if is_http else http.client.HTTPSConnection
-            host = args.host or (DEFAULT_DOMAIN if not is_http else DEFAULT_HOST)
+            conn = http.client.HTTPSConnection if enable_https else http.client.HTTPConnection
+            host = args.host or (DEFAULT_DOMAIN if enable_https else DEFAULT_HOST)
             client = conn(host, args.port)
             
             headers = {
@@ -1843,7 +2441,7 @@ def main(fris): # fris is the "self." from the caller (friday.py)
         cert_path=cert_path,
         key_path=key_path,
         ca_path=ca_path,
-        is_http=is_http,
+        enable_https=enable_https,
         server_info={
             "name": "mcp-link-server",
             "version": VERSION,
@@ -1885,6 +2483,48 @@ def main(fris): # fris is the "self." from the caller (friday.py)
     # Register page handlers
     server.default_request_handler = handle_default_request  # Default handler for unmatched paths
     
+    # Auto-register with discovered IDEs
+    def delayed_auto_register(server_config):
+        """Run auto-registration after a short delay to ensure server is ready."""
+        try:
+            time.sleep(5.0) # Wait 5s for server to start listening
+            from .ide_integration_manager import get_ide_integration_manager
+            manager = get_ide_integration_manager()
+            MCPLogger.log("Server", f"Starting Auto-registration with IDEs (url={server_config.get('url')})")
+            result = manager.auto_register_on_startup(server_config)
+            MCPLogger.log("Server", f"Auto-registration completed. Full result: {result}")
+        except Exception as e:
+            MCPLogger.log("Warning", f"Auto-registration failed: {e}")
+            import traceback
+            MCPLogger.log("Warning from Auto-registration", traceback.format_exc())
+
+    try:
+        api_key = get_api_key_from_config()
+        
+        # Determine server URL
+        # If args.host is set, use it. If not, check args.http to decide default.
+        if args.host:
+            server_host = args.host
+        else:
+            server_host = DEFAULT_DOMAIN if not args.http else DEFAULT_HOST
+            
+        protocol = "http" if args.http else "https"
+        server_url = f"{protocol}://{server_host}:{args.port}/sse"
+        
+        reg_config = {
+            "name": "mypc",
+            "url": server_url,
+            "auth_token": api_key or ""
+        }
+        
+        # Launch in separate thread so we don't block server startup
+        threading.Thread(target=delayed_auto_register, args=(reg_config,), daemon=True).start()
+        
+    except Exception as e:
+        MCPLogger.log("Warning", f"Auto-registration setup failed: {e}")
+        import traceback
+        MCPLogger.log("Warning", traceback.format_exc())
+
     # Start server
     try:
         server.serve_forever(fris)

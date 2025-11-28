@@ -11,8 +11,8 @@ VERSION: 2025.09.13.001 - Proxy to friday.py UIService (No Direct Qt)
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ʋꓬոꓦl𝟑ΜAƲ𝟙2DᎻƘƬꓝⲟ𝟧ʈꓟGƶϜꓳՕӠОɌVԛ×ᖴIĸ×օΗȢϨꓜƤоΗƦꓑΡųf𝟦ᎠНꓦƙƐΗƐᗷցiɌƐⲔEĐΜƻMЕꓴꓑΤꓚꓰսŪЈƐ𝛢ᏟрƋƊďꓚ𝟦ΕꓦᏴdӠĵꓣƎZƧᴜᴅ𝟛ŪqᏟrƙ95ĐᗞοI"
-"signdate": "2025-10-29T15:42:49.608Z",
+"signature": "JƲ৭ЕY𝟧MꓑƼDlþ𝕌𝟑ģКϹᎻОᛕďոƍµMþPRеОgꓔÞνDģᏴcDᗅ𝟦ВÐНƋɋɋ𝟛ꓠU5ⲦfrƻYƘɯuᴍiiΟP9𝟣𝛢𝟟ƙ𐐕ꓧĸoʋᎬΒН𐓒ꓝɋꙄ𝟥ŧωꓑоꜱnϜtᎠОϜɌƤᗅАkΡƬ𝙰6ƼMР𝟛ցȜ3"
+"signdate": "2025-11-24T12:18:44.953Z",
 """
 
 # Version tracking for debugging MCP integration
@@ -75,7 +75,7 @@ TOOLS = [
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["readme", "show_popup", "show_dialog", "test_queue", "collect_api_key"],
+                    "enum": ["readme", "show_popup", "show_dialog", "test_queue", "collect_api_key", "show_toast", "send_message", "check_messages", "show_dashboard", "hide_dashboard", "get_message_history", "clear_messages"],
                     "description": "Operation to perform"
                 },
                 "html": {
@@ -156,6 +156,55 @@ TOOLS = [
                     "description": "URL where users can obtain an API key (used with collect_api_key operation)",
                     "default": ""
                 },
+                "message": {
+                    "type": "string",
+                    "description": "Toast notification message text (used with show_toast operation)"
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["info", "warning", "error", "success"],
+                    "description": "Toast notification level/severity (used with show_toast operation)",
+                    "default": "info"
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Message content text (used with send_message operation)"
+                },
+                "msg_type": {
+                    "type": "string",
+                    "enum": ["question", "status", "notification", "response"],
+                    "description": "Type of message (used with send_message operation)",
+                    "default": "status"
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "normal", "high", "critical"],
+                    "description": "Message priority level (used with send_message operation)",
+                    "default": "normal"
+                },
+                "requires_response": {
+                    "type": "boolean",
+                    "description": "Whether this message requires a user response (used with send_message operation)",
+                    "default": False
+                },
+                "show_dashboard": {
+                    "type": "boolean",
+                    "description": "Show dashboard window if hidden (used with send_message operation)",
+                    "default": True
+                },
+                "mark_as_read": {
+                    "type": "boolean",
+                    "description": "Mark retrieved messages as read (used with check_messages operation)",
+                    "default": True
+                },
+                "filter_type": {
+                    "type": "string",
+                    "description": "Filter messages by type (used with check_messages operation)"
+                },
+                "since_timestamp": {
+                    "type": "number",
+                    "description": "Only get messages after this timestamp (used with check_messages operation)"
+                },
                 "tool_unlock_token": {
                     "type": "string",
                     "description": "Security token, " + TOOL_UNLOCK_TOKEN + ", obtained from readme operation, or re-provided any time the AI lost context or gave a wrong token"
@@ -194,7 +243,37 @@ Good for displaying information or simple forms.
 Creates a modal dialog that blocks interaction with other windows until closed.
 Best for critical input like API keys or confirmation dialogs.
 
+### 3. show_toast - Toast notification message
+Shows a brief notification message in the system tray area.
+Perfect for quick status updates, confirmations, or alerts that don't require user interaction.
+Messages appear in the "Server Status" menu accessible from the system tray icon.
+
+### 4. send_message - Send async message to user (NON-BLOCKING)
+Sends a message to the user via a persistent dashboard window WITHOUT blocking AI execution.
+Perfect for status updates, progress reports, or questions while the AI continues working.
+The dashboard appears in the top-right corner with color-coded messages.
+
+### 5. check_messages - Check for user replies (NON-BLOCKING)
+Checks if the user has sent any messages back to the AI via the dashboard.
+Returns only NEW unread messages by default. Use this periodically to enable co-working!
+
+### 6. show_dashboard - Show the message dashboard window
+Displays the persistent message dashboard if it's hidden.
+The dashboard shows all AI↔User message history with timestamps and priorities.
+
+### 7. hide_dashboard - Hide the message dashboard window
+Hides the dashboard window (messages are still queued and accessible).
+
+### 8. get_message_history - Get complete message history
+Returns ALL messages (both AI-to-user and user-to-AI) regardless of read status.
+Useful for reviewing the entire conversation history.
+
+### 9. clear_messages - Clear all message queues
+Clears all messages from the queue (use with caution!).
+
 ## Parameters
+
+### For show_popup and show_dialog operations:
 - **html** (required): Full HTML content including DOCTYPE, head, body
 - **title** (optional): Window title (default: "User Interface")
 - **width** (optional): Window width in pixels (default: 600)
@@ -205,6 +284,25 @@ Best for critical input like API keys or confirmation dialogs.
 - **always_on_top** (optional): true = keep window above other windows (default: true)
 - **bring_to_front** (optional): true = force window to foreground (default: true)
 - **auto_resize** (optional): true = automatically resize window to fit content (default: false)
+
+### For show_toast operation:
+- **message** (required): The text message to display in the toast notification
+- **level** (optional): Notification severity level - "info", "warning", "error", or "success" (default: "info")
+
+### For send_message operation:
+- **content** (required): The message text to send to the user
+- **msg_type** (optional): Message type - "question", "status", "notification", or "response" (default: "status")
+- **priority** (optional): Priority level - "low", "normal", "high", or "critical" (default: "normal")
+- **requires_response** (optional): Whether this message requires a user response (default: false)
+- **show_dashboard** (optional): Show dashboard window if hidden (default: true)
+
+### For check_messages operation:
+- **mark_as_read** (optional): Mark retrieved messages as read so they won't be returned again (default: true)
+- **filter_type** (optional): Filter messages by type (e.g., "response", "question")
+- **since_timestamp** (optional): Only get messages after this timestamp
+
+### For show_dashboard, hide_dashboard, get_message_history, clear_messages operations:
+- No additional parameters required (just operation and tool_unlock_token)
 
 ## Window Sizing Guidelines
 **IMPORTANT:** Qt WebEngine adds window chrome (title bar + borders) to your requested size:
@@ -397,6 +495,115 @@ When `auto_resize: true`, the window starts larger than requested, measures the 
 }
 ```
 
+### 4. Show toast notification:
+```json
+{
+  "input": {
+    "operation": "show_toast",
+    "message": "File uploaded successfully!",
+    "level": "success",
+    "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+  }
+}
+```
+
+### 5. Send async message to user (NON-BLOCKING):
+```json
+{
+  "input": {
+    "operation": "send_message",
+    "content": "Starting Android app setup...\\n\\nStep 1: Installing Android Studio\\nStep 2: Configuring SDK",
+    "msg_type": "status",
+    "priority": "normal",
+    "show_dashboard": true,
+    "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+  }
+}
+```
+
+### 6. Check for user replies (NON-BLOCKING):
+```json
+{
+  "input": {
+    "operation": "check_messages",
+    "mark_as_read": true,
+    "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+  }
+}
+```
+
+Returns:
+```json
+{
+  "messages": [
+    {
+      "id": "msg-uuid",
+      "timestamp": 1763524358.29,
+      "direction": "user_to_ai",
+      "type": "response",
+      "priority": "normal",
+      "content": "Looks good! Continue with step 2",
+      "requires_response": false,
+      "status": "pending"
+    }
+  ],
+  "count": 1
+}
+```
+
+### 7. Get complete message history:
+```json
+{
+  "input": {
+    "operation": "get_message_history",
+    "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+  }
+}
+```
+
+### 8. Show/hide dashboard:
+```json
+{
+  "input": {
+    "operation": "show_dashboard",
+    "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+  }
+}
+```
+
+## Async Messaging Co-Working Pattern
+
+**Perfect for long-running tasks where you want user feedback!**
+
+```python
+# Send status update
+send_message("Starting Android setup...")
+
+# Do some work
+install_android_studio()
+
+# Check if user sent feedback
+messages = check_messages()
+if messages:
+    for msg in messages:
+        print(f"User says: {msg['content']}")
+        # Respond to user
+        send_message(f"Thanks! {msg['content']}")
+
+# Continue working
+configure_sdk()
+
+# Check again periodically
+messages = check_messages()
+```
+
+**Key Benefits:**
+- ✅ Non-blocking - AI continues working while dashboard is open
+- ✅ Bidirectional - User can send messages anytime
+- ✅ Persistent - Dashboard stays open, messages accumulate
+- ✅ Color-coded - AI messages (blue tint), User messages (green tint)
+- ✅ Timestamped - All messages have timestamps and priorities
+
 ## Return Values
 The tool returns a JSON response with user data:
 ```json
@@ -432,6 +639,9 @@ Or for cancellation/errors:
 - Multi-step wizards
 - Data entry forms
 - Error displays with actionable options
+- Quick status notifications (toast messages)
+- Background task completion alerts
+- Non-intrusive success/error messages
 """
     }
 ]
@@ -830,6 +1040,117 @@ def _show_webengine_window(html: str, title: str, width: int, height: int, modal
         return {"status": "error", "error": f"Error in UI communication: {str(e)}"}
 
 
+def show_toast_notification(params: Dict) -> Dict:
+    """Show a toast notification message in the system tray.
+    
+    Args:
+        params: Dictionary containing the operation parameters including message and level
+        
+    Returns:
+        Dict containing success status or error information
+    """
+    try:
+        # Extract parameters
+        message = params.get("message")
+        level = params.get("level", "info")
+        
+        # Validate message parameter
+        if not message:
+            return create_error_response("Missing required parameter: 'message' is required for show_toast operation", with_readme=True)
+        if not isinstance(message, str):
+            return create_error_response(f"Parameter 'message' must be a string, got {type(message).__name__}", with_readme=False)
+        
+        # Validate level parameter
+        valid_levels = ["info", "warning", "error", "success"]
+        if level not in valid_levels:
+            return create_error_response(f"Parameter 'level' must be one of {valid_levels}, got '{level}'", with_readme=False)
+        
+        MCPLogger.log(TOOL_LOG_NAME, f"Showing toast notification: [{level}] {message}")
+        
+        # Try to emit the toast message via friday.py's message queue
+        try:
+            result = _emit_toast_message(message, level)
+            return {
+                "content": [{"type": "text", "text": json.dumps(result, indent=2)}],
+                "isError": False
+            }
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Toast notification failed: {str(e)}")
+            MCPLogger.log(TOOL_LOG_NAME, f"Stack trace: {traceback.format_exc()}")
+            return create_error_response(f"Toast notification failed: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error processing toast notification: {str(e)}", with_readme=True)
+
+
+def _emit_toast_message(message: str, level: str) -> Dict:
+    """Internal function to emit a toast message to friday.py's message queue.
+    
+    Args:
+        message: The toast message text
+        level: Message level (info, warning, error, success)
+        
+    Returns:
+        Dict with status information
+    """
+    try:
+        thread_id = threading.current_thread().ident
+        MCPLogger.log(TOOL_LOG_NAME, f"Emitting toast message: [{level}] {message} [Thread: {thread_id}]")
+        
+        # Access friday.py's engine instance via sys.modules
+        try:
+            friday_module = sys.modules.get('__main__')
+            
+            if friday_module is None:
+                return {"status": "error", "error": "Could not access friday.py module. Ensure server was started via friday.py."}
+            
+            # Get the engine instance which has the _emit_message method
+            engine = getattr(friday_module, 'engine', None)
+            
+            if engine is None:
+                return {"status": "error", "error": "No engine instance available. Ensure friday.py is running with Qt support."}
+            
+            # Check if engine has the _emit_message method
+            if not hasattr(engine, '_emit_message'):
+                return {"status": "error", "error": "Engine does not have _emit_message method. Ensure friday.py version supports toast messages."}
+            
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Could not access friday.py engine: {e}")
+            MCPLogger.log(TOOL_LOG_NAME, f"Registry access error stack trace: {traceback.format_exc()}")
+            return {"status": "error", "error": "Could not access friday.py engine. Ensure server was started via friday.py."}
+        
+        # Format message with level prefix for visual distinction
+        level_prefixes = {
+            "info": "ℹ️",
+            "success": "✅",
+            "warning": "⚠️",
+            "error": "❌"
+        }
+        prefix = level_prefixes.get(level, "ℹ️")
+        formatted_message = f"{prefix} {message}"
+        
+        # Emit the message using the engine's _emit_message method
+        try:
+            engine._emit_message(formatted_message, level)
+            MCPLogger.log(TOOL_LOG_NAME, f"Toast message emitted successfully: [{level}] {message}")
+            
+            return {
+                "status": "success",
+                "message": "Toast notification sent successfully",
+                "level": level,
+                "text": message
+            }
+            
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Failed to emit message: {str(e)}")
+            return {"status": "error", "error": f"Failed to emit toast message: {str(e)}"}
+        
+    except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"CRITICAL ERROR in toast emission: {str(e)}")
+        MCPLogger.log(TOOL_LOG_NAME, f"Complete stack trace: {traceback.format_exc()}")
+        return {"status": "error", "error": f"Error in toast communication: {str(e)}"}
+
+
 def collect_api_key_from_user(params: Dict) -> Dict:
     """Collect an API key from the user using a specialized HTML dialog.
     
@@ -892,8 +1213,8 @@ def _generate_api_key_collection_html(service_name: str, service_url: str) -> st
     # Extract server details
     host = server_config.get("host", "127-0-0-1.local.aurafriday.com")
     port = server_config.get("port", 31173)
-    use_http = server_config.get("use_http", False)
-    protocol = "http" if use_http else "https"
+    enable_https = server_config.get("enable_https", True)
+    protocol = "https" if enable_https else "http"
     
     # Get the ephemeral API key for authentication
     # This is the _internal user's API key that was generated at server startup
@@ -1214,6 +1535,330 @@ def _generate_api_key_collection_html(service_name: str, service_url: str) -> st
     return html
 
 
+def send_message_to_user(params: Dict) -> Dict:
+    """
+    Send async message to user without blocking.
+    
+    Parameters from params dict:
+    - content: Message text (required)
+    - msg_type: "question", "status", "notification", "response" (default: "status")
+    - priority: "low", "normal", "high", "critical" (default: "normal")
+    - requires_response: bool (default: False)
+    - show_dashboard: bool (default: True)
+    """
+    try:
+        content = params.get("content")
+        if not content:
+            return create_error_response("Missing required parameter: content", with_readme=False)
+        
+        msg_type = params.get("msg_type", "status")
+        priority = params.get("priority", "normal")
+        requires_response = params.get("requires_response", False)
+        show_dashboard = params.get("show_dashboard", True)
+        
+        # Create message object
+        message = {
+            'id': str(uuid.uuid4()),
+            'timestamp': time.time(),
+            'direction': 'ai_to_user',
+            'type': msg_type,
+            'priority': priority,
+            'content': content,
+            'requires_response': requires_response,
+            'status': 'pending'
+        }
+        
+        MCPLogger.log(TOOL_LOG_NAME, f"Sending message to user: [{msg_type}/{priority}] {content[:50]}...")
+        
+        # Send via queue to friday.py
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available. Ensure friday.py is running.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            request_data = {
+                'operation': 'send_message',
+                'message': message,
+                'show_dashboard': show_dashboard
+            }
+            
+            ui_request = UIRequest(
+                operation="send_message",
+                data=request_data,
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            # Wait for confirmation
+            try:
+                response = reply_queue.get(timeout=5)
+                
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "message_id": message['id'],
+                            "status": "queued",
+                            "timestamp": message['timestamp']
+                        }, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for message queue confirmation", with_readme=False)
+                
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error sending message: {str(e)}")
+            return create_error_response(f"Error sending message: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in send_message: {str(e)}", with_readme=False)
+
+
+def check_user_messages(params: Dict) -> Dict:
+    """
+    Check for messages from user (non-blocking).
+    
+    Parameters from params dict:
+    - mark_as_read: bool (default: True)
+    - filter_type: Optional filter by message type
+    - since_timestamp: Only get messages after this time
+    """
+    try:
+        mark_as_read = params.get("mark_as_read", True)
+        filter_type = params.get("filter_type")
+        since_timestamp = params.get("since_timestamp")
+        
+        MCPLogger.log(TOOL_LOG_NAME, f"Checking for user messages (filter_type={filter_type}, since={since_timestamp})")
+        
+        # Get messages from friday.py queue
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available. Ensure friday.py is running.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            request_data = {
+                'operation': 'check_messages',
+                'mark_as_read': mark_as_read,
+                'filter_type': filter_type,
+                'since_timestamp': since_timestamp
+            }
+            
+            ui_request = UIRequest(
+                operation="check_messages",
+                data=request_data,
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            # Wait for response
+            try:
+                response = reply_queue.get(timeout=5)
+                messages = response.get('messages', [])
+                
+                MCPLogger.log(TOOL_LOG_NAME, f"Retrieved {len(messages)} messages from user")
+                
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "messages": messages,
+                            "count": len(messages)
+                        }, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for message check response", with_readme=False)
+                
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error checking messages: {str(e)}")
+            return create_error_response(f"Error checking messages: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in check_messages: {str(e)}", with_readme=False)
+
+
+def show_message_dashboard(params: Dict) -> Dict:
+    """Show the persistent message dashboard window."""
+    try:
+        MCPLogger.log(TOOL_LOG_NAME, "Showing message dashboard")
+        
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available. Ensure friday.py is running.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            request_data = {
+                'operation': 'show_dashboard'
+            }
+            
+            ui_request = UIRequest(
+                operation="show_dashboard",
+                data=request_data,
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            try:
+                response = reply_queue.get(timeout=10)
+                
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "status": "success",
+                            "message": "Dashboard shown"
+                        }, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for dashboard to show", with_readme=False)
+                
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error showing dashboard: {str(e)}")
+            return create_error_response(f"Error showing dashboard: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in show_dashboard: {str(e)}", with_readme=False)
+
+
+def hide_message_dashboard(params: Dict) -> Dict:
+    """Hide the message dashboard window."""
+    try:
+        MCPLogger.log(TOOL_LOG_NAME, "Hiding message dashboard")
+        
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            ui_request = UIRequest(
+                operation="hide_dashboard",
+                data={'operation': 'hide_dashboard'},
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            try:
+                response = reply_queue.get(timeout=5)
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({"status": "success", "message": "Dashboard hidden"}, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for dashboard to hide", with_readme=False)
+                
+        except Exception as e:
+            return create_error_response(f"Error hiding dashboard: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in hide_dashboard: {str(e)}", with_readme=False)
+
+
+def get_message_history(params: Dict) -> Dict:
+    """Get all message history."""
+    try:
+        MCPLogger.log(TOOL_LOG_NAME, "Getting message history")
+        
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            ui_request = UIRequest(
+                operation="get_message_history",
+                data={'operation': 'get_message_history'},
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            try:
+                response = reply_queue.get(timeout=5)
+                history = response.get('history', [])
+                
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "history": history,
+                            "count": len(history)
+                        }, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for message history", with_readme=False)
+                
+        except Exception as e:
+            return create_error_response(f"Error getting message history: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in get_message_history: {str(e)}", with_readme=False)
+
+
+def clear_message_queues(params: Dict) -> Dict:
+    """Clear all message queues."""
+    try:
+        MCPLogger.log(TOOL_LOG_NAME, "Clearing message queues")
+        
+        try:
+            request_queue = sys.modules.get('friday_ui_queue')
+            if request_queue is None:
+                return create_error_response("No UI request queue available.", with_readme=False)
+            
+            reply_queue = queue.Queue()
+            
+            ui_request = UIRequest(
+                operation="clear_messages",
+                data={'operation': 'clear_messages'},
+                reply_queue=reply_queue
+            )
+            
+            request_queue.put(ui_request)
+            
+            try:
+                response = reply_queue.get(timeout=5)
+                
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": json.dumps({
+                            "status": "success",
+                            "message": "Message queues cleared"
+                        }, indent=2)
+                    }],
+                    "isError": False
+                }
+            except queue.Empty:
+                return create_error_response("Timeout waiting for clear confirmation", with_readme=False)
+                
+        except Exception as e:
+            return create_error_response(f"Error clearing messages: {str(e)}", with_readme=False)
+            
+    except Exception as e:
+        return create_error_response(f"Error in clear_messages: {str(e)}", with_readme=False)
+
+
 def handle_user(input_param: Dict) -> Dict:
     """Handle user interaction tool operations via MCP interface."""
     try:
@@ -1274,6 +1919,10 @@ def handle_user(input_param: Dict) -> Dict:
             # Test queue communication without Qt operations
             result = test_queue_communication(validated_params)
             return result
+        elif operation == "show_toast":
+            # Show toast notification message
+            result = show_toast_notification(validated_params)
+            return result
         elif operation == "collect_api_key":
             # Collect API key from user using a specialized dialog
             result = collect_api_key_from_user(validated_params)
@@ -1286,6 +1935,30 @@ def handle_user(input_param: Dict) -> Dict:
                 validated_params["modal"] = True   # Default to modal for show_dialog
                 
             result = show_html_window(validated_params)
+            return result
+        elif operation == "send_message":
+            # Send async message to user without blocking
+            result = send_message_to_user(validated_params)
+            return result
+        elif operation == "check_messages":
+            # Check for messages from user
+            result = check_user_messages(validated_params)
+            return result
+        elif operation == "show_dashboard":
+            # Show persistent message dashboard
+            result = show_message_dashboard(validated_params)
+            return result
+        elif operation == "hide_dashboard":
+            # Hide the message dashboard
+            result = hide_message_dashboard(validated_params)
+            return result
+        elif operation == "get_message_history":
+            # Get all message history
+            result = get_message_history(validated_params)
+            return result
+        elif operation == "clear_messages":
+            # Clear message queues
+            result = clear_message_queues(validated_params)
             return result
         elif operation == "readme":
             # This should have been handled above, but just in case

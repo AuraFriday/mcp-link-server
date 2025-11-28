@@ -4,149 +4,273 @@ Project: Aura Friday MCP-Link Server
 Component: System Automation Tool
 Author: Christopher Nathan Drake (cnd)
 
-RagTag System Tool - Windows Desktop Automation and Management
+RagTag System Tool - Cross-Platform Desktop Automation and Management
 
-Tool implementation for providing comprehensive Windows desktop automation including:
+! NOTE !  When finding, changing, or adding code in this file BEWARE that this one file serves 3 very different platforms.
+Search for the big separator comments with these headings to be sure you're in the correct section!
+
+        ################################   WINDOWS SPECIFIC ROUTINES   ################################
+        ################################   APPLE MAC SPECIFIC ROUTINES   ################################
+        ################################   LINUX SPECIFIC ROUTINES   ################################
+        ################################   COMMON CODE FOR ALL PLATFORMS   ################################
+
+Tool implementation for providing comprehensive desktop automation including:
 - Window management and enumeration
 - UI element scanning and interaction
 - Screenshot and OCR capabilities
 - Layout management and automation
 
-## IMPORTANT: Electron App Accessibility Requirements
+## ✅ ELECTRON APP ACCESSIBILITY - FULLY WORKING
 
-### Current Limitation
-Currently, Electron apps (Signal, Cursor, Joplin, Discord, etc.) only expose basic window chrome
-(title bar, minimize/maximize buttons) rather than their rich internal content when scanned.
-This is because Chromium/Electron apps only expose their full accessibility tree when they
-detect an assistive technology (AT) client is present.
+### Current Status: FULLY FUNCTIONAL
+Electron apps (Signal, Cursor, Joplin, Discord, etc.) now expose their **complete** accessibility tree
+including all internal content when scanned. Testing confirms extraction of 1,490+ UI elements from
+Cursor IDE including tabs, file names, status indicators, and deep UI tree structures.
 
-### Root Cause
+### What Works
+**Verified on Cursor IDE (2025-11-10):**
+- ✅ **TabItemControl** elements with full tab names and selection states
+- ✅ File tabs with status indicators ("• 5 problems in this file • Modified")
+- ✅ Deep tree traversal (depth level 29+) into Electron's DOM/ARIA tree
+- ✅ Complete coordinate data for every UI element
+- ✅ All control types (GroupControl, TextControl, ButtonControl, etc.)
+- ✅ Visibility states, focus states, and accessibility properties
+
+**Example Extracted Data:**
+- Tab names: "Selecting a template for mcu_serial tool" (as TabItemControl)
+- File status: "system.py • 5 problems in this file"
+- File state: "mcu_serial.py • 8 problems in this file • Modified"
+- Symbolic links: "friday.py • 16 problems in this file • Symbolic Link"
+
+### How It Works
+The solution is **already active** through multiple mechanisms:
+
+1. **Environment Variables** (set by user):
+   - `ELECTRON_ENABLE_ACCESSIBILITY=1` - Forces Electron to enable accessibility
+   - `ELECTRON_FORCE_RENDERER_ACCESSIBILITY=1` - Forces renderer process accessibility
+
+2. **Server Registration** (implemented in `friday.py` lines 2257-2536):
+   The `WindowsAccessibilityManager` class implements **dual-protocol accessibility registration**:
+   
+   **a) Traditional Windows Apps** (`_enable_traditional_screen_reader_mode()`):
+   - Sets `SPI_SETSCREENREADER` flag via `SystemParametersInfoW()`
+   - Makes Windows maintain text accessibility data for all windows
+   - Line 2344: `SystemParametersInfoW(SPI_SETSCREENREADER, 1, None, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE)`
+   
+   **b) Chrome/Electron Apps** (`_enable_chrome_detection_protocol()`):
+   - Creates hidden message-only window named "AuraFridayAccessibilityWindow" (line 2445)
+   - Responds to `WM_GETOBJECT` messages with Chrome's custom child ID (line 2405)
+   - Sends `NotifyWinEvent(EVENT_SYSTEM_ALERT)` to signal assistive tech presence (line 2375)
+   - This completes Chrome's accessibility handshake protocol automatically
+   
+   Called at startup: Line 4183 in `SystemTrayApp._enable_windows_accessibility_mode()`
+
+3. **Windows UI Automation**: The `uiautomation` library handles the WM_GETOBJECT handshake
+   transparently when creating controls from Electron window handles.
+
+### Technical Details
 Electron apps use a Windows handshake protocol:
 1. Chromium calls `NotifyWinEvent(EVENT_SYSTEM_ALERT, ..., id = 1)`
 2. An AT client must respond with `WM_GETOBJECT(id = 1)`
-3. Only then does Chromium switch to "AX-complete mode" and expose the full DOM/ARIA tree
+3. Chromium switches to "AX-complete mode" and exposes full DOM/ARIA tree
 
-### Solution (TO BE IMPLEMENTED)
-We need to implement the WM_GETOBJECT handshake in our tool. This can be done by:
+**This handshake is now automatic** thanks to:
+- Environment variables forcing accessibility mode at Electron startup
+- UI Automation library generating WM_GETOBJECT when accessing Chrome_WidgetWin_1 windows
+- Server's AT client registration making Windows treat us as assistive technology
 
-1. **Automatic handshake in scan_ui_elements**: Before scanning any window, check if it's
-   an Electron app (Chrome_WidgetWin_1 class) and send the handshake if needed.
-
-2. **Implementation options**:
-   - Use `AccessibleObjectFromWindow(hwnd, OBJID_CLIENT, IID_IAccessible, out var acc)`
-   - Or `IUIAutomation::ElementFromHandle` call
-   - Both generate the required `WM_GETOBJECT` message automatically
-
-3. **Alternative approaches**:
-   - Start Windows Narrator (`Win + Ctrl + Enter`) before scanning
-   - Run Microsoft Inspect.exe or Accessibility Insights
-   - Keep Windows Magnifier enabled
-
-### When to Implement
-This should be implemented during the **console-to-system-tray migration** because:
-- System tray apps are better positioned to act as persistent AT clients
-- We can register as an accessibility client once at startup
-- Eliminates the need for manual Narrator activation
-- Provides seamless Electron app support for all users
-
-### Expected Results After Implementation
-- Signal: Should expose message input fields, chat messages, contact lists, etc.
-- Cursor: Should expose code editor content, file trees, UI panels, etc.
-- Joplin: Should expose note content, notebook lists, editor controls, etc.
-- All Electron apps: Full DOM/ARIA tree instead of just window chrome
-
-The handshake only needs to occur once per Chromium process and applies to all windows
-from that process for its lifetime.
+### Performance Notes
+- Scans extract 1,490+ elements in ~2-3 seconds
+- Deep tree traversal to level 29+ provides complete UI structure
+- No manual intervention required (no need to start Narrator/Magnifier)
+- Handshake occurs once per Chromium process and persists for process lifetime
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "օРⲘꓴⲘRTÞßАⅠSʋҮ𝟤ᴍ1ƐΝƬ9ᏴƧр𝟚XᑕɗƘŧÞƛοbꓜᎬ𝛢ᗷ7tꓬ𝟪μᴜɊᗞ𝟚Ⲣꓐ𝟛ցⅼƎᗪs6ꓐþ62ƊlΝАDᎪEτnᗅꓬtBⴹĸⲢᎠᖴꓣՕbѵᗪ1ƵXɗƐƦyᒿ𝟩еpⅼꓳѡß𝟙4ոᑕꓓGᴠ𝕌8ЗG"
-"signdate": "2025-10-14T15:42:31.814Z",
+"signature": "ꓔꓐƐꓣꓬτΤƧD𝟚×ƛƲȢꜱƶ4սԝ𝟚K𝕌ⲢꓦɅꓑꓗᴛƎ4ƏᖴƛꓧᏂSꓟƐď𝟙ÞUꓐЈр𝟨wƿƶĵᎪȜᏮɪŧΜ𝟩ωοЗᴠРLΗƵEĵƧO7АᏴCƶǝВ𝟚KƍkΝ3WßАɯСոĐΜbꓑƘȠƎ𐓒5ᗪkеʋᒿƱᛕLМuꓔƘ"
+"signdate": "2025-11-26T02:00:38.554Z",
 """
 
+# ============================================================================
+# PLATFORM DETECTION AND COMMON IMPORTS
+# ============================================================================
+
 import json
-import win32gui
-import win32con
-import win32api
-import psutil
 import platform
-import winreg
-import win32process
-from easy_mcp.server import MCPLogger, get_tool_token
-from ragtag.shared_config import get_user_data_directory, get_config_manager
-from typing import Dict, List, Optional, Union, BinaryIO, Tuple
-import time
-import win32console
-import uiautomation as auto
-from dataclasses import dataclass, asdict
-import pythoncom
 import os
-import ctypes
-from ctypes import wintypes
-import tempfile
-from PIL import Image, ImageGrab
-import traceback
+import sys
+import time
 import subprocess
 import threading
 import signal
 import queue
+import tempfile
+import traceback
 from datetime import datetime
+from typing import Dict, List, Optional, Union, BinaryIO, Tuple
+from dataclasses import dataclass, asdict
+
+# Determine current platform
+CURRENT_PLATFORM = platform.system()  # Returns 'Windows', 'Darwin' (macOS), or 'Linux'
+IS_WINDOWS = CURRENT_PLATFORM == 'Windows'
+IS_MACOS = CURRENT_PLATFORM == 'Darwin'
+IS_LINUX = CURRENT_PLATFORM == 'Linux'
+
+# Common imports that work on all platforms
+from easy_mcp.server import MCPLogger, get_tool_token
+from ragtag.shared_config import get_user_data_directory, get_config_manager
+
+try:
+    import psutil  # Cross-platform process utilities
+except ImportError:
+    psutil = None
+
+try:
+    from PIL import Image  # Cross-platform image handling
+except ImportError:
+    Image = None
+
+# ============================================================================
+# PLATFORM-SPECIFIC IMPORTS
+# ============================================================================
+
+if IS_WINDOWS:
+    # Windows-specific imports
+    try:
+        import win32gui
+        import win32con
+        import win32api
+        import win32process
+        import win32console
+        import winreg
+        import ctypes
+        from ctypes import wintypes
+        import pythoncom
+        import uiautomation as auto
+        from PIL import ImageGrab
+    except ImportError as e:
+        MCPLogger.log("SYSTEM", f"Warning: Windows-specific import failed: {e}")
+        
+elif IS_MACOS:
+    # macOS-specific imports (to be implemented)
+    try:
+        # import Quartz  # For window management
+        # import AppKit  # For application control
+        # import Cocoa   # For UI automation
+        pass
+    except ImportError as e:
+        MCPLogger.log("SYSTEM", f"Warning: macOS-specific import failed: {e}")
+        
+elif IS_LINUX:
+    # Linux-specific imports
+    try:
+        # Try PyWinCtl first (cross-platform, works on X11 and Wayland)
+        try:
+            import pywinctl as pwc
+            LINUX_HAS_PYWINCTL = True
+        except ImportError:
+            LINUX_HAS_PYWINCTL = False
+            MCPLogger.log("SYSTEM", "PyWinCtl not available - install with: pip install pywinctl")
+        
+        # Fallback to X11-specific tools
+        try:
+            from Xlib import X, display
+            from Xlib.error import DisplayError
+            LINUX_HAS_XLIB = True
+        except ImportError:
+            LINUX_HAS_XLIB = False
+            
+    except ImportError as e:
+        MCPLogger.log("SYSTEM", f"Warning: Linux-specific import failed: {e}")
+        LINUX_HAS_PYWINCTL = False
+        LINUX_HAS_XLIB = False
 
 # Constants
 VERSION = "1.1.0.0"
 TOOL_LOG_NAME = "SYSTEM"
 
-# Advanced window activation constants and structures (from activate_window_o3.py)
-ASFW_ANY = -1
-SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000
-SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
-KEYEVENTF_UNICODE = 0x0004
-
-ULONG_PTR = wintypes.WPARAM  # same width as pointer on Windows
-
-class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk",       wintypes.WORD),
-                ("wScan",     wintypes.WORD),
-                ("dwFlags",   wintypes.DWORD),
-                ("time",      wintypes.DWORD),
-                ("dwExtraInfo", ULONG_PTR)]
-
-class MOUSEINPUT(ctypes.Structure):
-    _fields_ = [("dx",        wintypes.LONG),
-                ("dy",        wintypes.LONG),
-                ("mouseData", wintypes.DWORD),
-                ("dwFlags",   wintypes.DWORD),
-                ("time",      wintypes.DWORD),
-                ("dwExtraInfo", ULONG_PTR)]
-
-class HARDWAREINPUT(ctypes.Structure):
-    _fields_ = [("uMsg",      wintypes.DWORD),
-                ("wParamL",   wintypes.WORD),
-                ("wParamH",   wintypes.WORD)]
-
-class INPUT_UNION(ctypes.Union):
-    _fields_ = [("mi", MOUSEINPUT),
-                ("ki", KEYBDINPUT),
-                ("hi", HARDWAREINPUT)]
-
-class DUMMYUNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
-
-class INPUT(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type",  wintypes.DWORD),
-                ("u",     DUMMYUNION)]
-
-# Full INPUT structure for advanced input
-class INPUT_FULL(ctypes.Structure):
-    _anonymous_ = ("u",)
-    _fields_ = [("type",  wintypes.DWORD),
-                ("u",     INPUT_UNION)]
-
-user32 = ctypes.windll.user32
-
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
+
+# Tool name with optional suffix from environment variable
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
+TOOL_NAME = f"system{TOOL_NAME_SUFFIX}"
+
+
+################################################################################################################################
+################################################################################################################################
+################################                      WINDOWS SPECIFIC ROUTINES                 ################################
+################################################################################################################################
+################################################################################################################################
+
+# Advanced window activation constants and structures (from activate_window_o3.py)
+# Only define Windows-specific constants on Windows platform
+if IS_WINDOWS:
+    ASFW_ANY = -1
+    SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000
+    SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+    KEYEVENTF_UNICODE = 0x0004
+
+    ULONG_PTR = wintypes.WPARAM  # same width as pointer on Windows
+else:
+    # Placeholder values for non-Windows platforms
+    ASFW_ANY = None
+    SPI_GETFOREGROUNDLOCKTIMEOUT = None
+    SPI_SETFOREGROUNDLOCKTIMEOUT = None
+    KEYEVENTF_UNICODE = None
+    ULONG_PTR = None
+
+if IS_WINDOWS:
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [("wVk",       wintypes.WORD),
+                    ("wScan",     wintypes.WORD),
+                    ("dwFlags",   wintypes.DWORD),
+                    ("time",      wintypes.DWORD),
+                    ("dwExtraInfo", ULONG_PTR)]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [("dx",        wintypes.LONG),
+                    ("dy",        wintypes.LONG),
+                    ("mouseData", wintypes.DWORD),
+                    ("dwFlags",   wintypes.DWORD),
+                    ("time",      wintypes.DWORD),
+                    ("dwExtraInfo", ULONG_PTR)]
+
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [("uMsg",      wintypes.DWORD),
+                    ("wParamL",   wintypes.WORD),
+                    ("wParamH",   wintypes.WORD)]
+
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT),
+                    ("ki", KEYBDINPUT),
+                    ("hi", HARDWAREINPUT)]
+
+    class DUMMYUNION(ctypes.Union):
+        _fields_ = [("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type",  wintypes.DWORD),
+                    ("u",     DUMMYUNION)]
+
+    # Full INPUT structure for advanced input
+    class INPUT_FULL(ctypes.Structure):
+        _anonymous_ = ("u",)
+        _fields_ = [("type",  wintypes.DWORD),
+                    ("u",     INPUT_UNION)]
+
+    user32 = ctypes.windll.user32
+else:
+    # Placeholder classes for non-Windows platforms
+    KEYBDINPUT = None
+    MOUSEINPUT = None
+    HARDWAREINPUT = None
+    INPUT_UNION = None
+    DUMMYUNION = None
+    INPUT = None
+    INPUT_FULL = None
+    user32 = None
 
 # ============================================================================
 # TERMINAL SESSION MANAGEMENT CLASSES
@@ -254,6 +378,7 @@ class comprehensive_terminal_session_manager_with_background_support:
                         escaped_command = command_text.replace('"', '\\"')
                         wsl_command = f'wsl -e bash -c "{escaped_command}"'
                     
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing WSL command: {wsl_command[:100]}...")
                     process = subprocess.Popen(
                         wsl_command,
                         shell=True,
@@ -261,7 +386,7 @@ class comprehensive_terminal_session_manager_with_background_support:
                         stderr=subprocess.STDOUT,
                         text=True,
                         bufsize=0,
-                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                     )
                 else:
                     # Windows process creation with specified shell
@@ -271,16 +396,18 @@ class comprehensive_terminal_session_manager_with_background_support:
                         'stderr': subprocess.STDOUT,
                         'text': True,
                         'bufsize': 0,
-                        'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP
+                        'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                     }
                     
                     if shell_executable:
                         popen_kwargs['executable'] = shell_executable
                     
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Windows command: {command_text[:100]}...")
                     process = subprocess.Popen(command_text, **popen_kwargs)
             else:
                 # Unix process creation
                 if shell_executable:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command with shell {shell_executable}: {command_text[:100]}...")
                     process = subprocess.Popen(
                         [shell_executable, '-c', command_text],
                         stdout=subprocess.PIPE,
@@ -290,6 +417,7 @@ class comprehensive_terminal_session_manager_with_background_support:
                         preexec_fn=os.setsid if hasattr(os, 'setsid') else None
                     )
                 else:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command: {command_text[:100]}...")
                     process = subprocess.Popen(
                         command_text.split(),
                         stdout=subprocess.PIPE,
@@ -1285,6 +1413,10 @@ class comprehensive_ui_tree_walker_with_text_extraction:
 # Helper to get the specific Windows version name for the tool description
 def get_windows_product_name():
     """Fetches the full Windows product name from the registry for better context."""
+    if not IS_WINDOWS:
+        # Return platform-appropriate description for non-Windows systems
+        return platform.platform(terse=True)
+    
     try:
         # The registry key that stores the full product name
         key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
@@ -1299,7 +1431,7 @@ def get_windows_product_name():
 # Tool definitions
 TOOLS = [
     {
-        "name": "system",
+        "name": TOOL_NAME,
         "description": f"""Use this tool to automate and manage the users operating-system ({get_windows_product_name()}), desktop, and applications etc.
 """,
         "parameters": {
@@ -3658,11 +3790,21 @@ def handle_take_screenshot(params: Dict) -> Dict:
         success, message, base64_data = take_screenshot_functional(hwnd, filename, region)
         
         if success:
-            # Use create_success_response with optional base64_image field
-            extra_fields = {}
+            # # Use create_success_response with optional base64_image field
+            # extra_fields = {}
+            # if base64_data:
+            #     extra_fields["base64_image"] = base64_data
+            # return create_success_response(message, **extra_fields)
+            
             if base64_data:
-                extra_fields["base64_image"] = base64_data
-            return create_success_response(message, **extra_fields)
+                # Return image using proper MCP image content type (like chrome_browser does)
+                return {
+                    "content": [{"type": "image", "mimeType": "image/png", "data": base64_data}],
+                    "isError": False
+                }
+            else:
+                # File was saved, return text message
+                return create_success_response(message)
         else:
             return create_error_response(message, with_readme=False)
             
@@ -3936,8 +4078,10 @@ def get_software_environment_summary_and_full() -> Dict[str, any]:
         
         # Check PowerShell execution policy
         try:
+            MCPLogger.log(TOOL_LOG_NAME, "Checking PowerShell execution policy")
             result = subprocess.run(['powershell', '-Command', 'Get-ExecutionPolicy'], 
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=10,
+                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             if result.returncode == 0:
                 software_info["powershell_execution_policy"] = result.stdout.strip()
         except:
@@ -3945,8 +4089,10 @@ def get_software_environment_summary_and_full() -> Dict[str, any]:
         
         # Check for Python
         try:
+            MCPLogger.log(TOOL_LOG_NAME, "Checking Python version")
             result = subprocess.run(['python', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             if result.returncode == 0:
                 software_info["python_version"] = result.stdout.strip()
         except:
@@ -3954,24 +4100,30 @@ def get_software_environment_summary_and_full() -> Dict[str, any]:
         
         # Check for Git
         try:
+            MCPLogger.log(TOOL_LOG_NAME, "Checking Git availability")
             result = subprocess.run(['git', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             software_info["git_available"] = result.returncode == 0
         except:
             pass
         
         # Check for Docker
         try:
+            MCPLogger.log(TOOL_LOG_NAME, "Checking Docker availability")
             result = subprocess.run(['docker', '--version'], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             software_info["docker_available"] = result.returncode == 0
         except:
             pass
         
         # Check for WSL - use --help instead of --list which is invalid on older WSL versions
         try:
+            MCPLogger.log(TOOL_LOG_NAME, "Checking WSL availability")
             result = subprocess.run(['wsl', '--help'], 
-                                  capture_output=True, text=True, timeout=5)
+                                  capture_output=True, text=True, timeout=5,
+                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             software_info["wsl_available"] = result.returncode == 0
         except:
             pass
@@ -4098,16 +4250,20 @@ def get_installed_applications_summary_and_full() -> Dict[str, any]:
         # Windows Store Apps (only available on Windows versions with Store)
         try:
             # Test if PowerShell and Get-AppxPackage are available
+            MCPLogger.log(TOOL_LOG_NAME, "Testing if Get-AppxPackage is available")
             test_command = ["powershell", "-Command", "Get-Command Get-AppxPackage -ErrorAction SilentlyContinue"]
-            test_result = subprocess.run(test_command, capture_output=True, text=True, timeout=10)
+            test_result = subprocess.run(test_command, capture_output=True, text=True, timeout=10,
+                                       creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
             
             if test_result.returncode == 0:  # Get-AppxPackage is available
+                MCPLogger.log(TOOL_LOG_NAME, "Retrieving Windows Store apps via Get-AppxPackage")
                 store_command = [
                     "powershell", "-Command",
                     "Get-AppxPackage | Select-Object Name, Version, Publisher, InstallLocation | ConvertTo-Json"
                 ]
                 
-                store_result = subprocess.run(store_command, capture_output=True, text=True, timeout=30)
+                store_result = subprocess.run(store_command, capture_output=True, text=True, timeout=30,
+                                            creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
                 
                 if store_result.returncode == 0 and store_result.stdout.strip():
                     import json
@@ -4471,11 +4627,13 @@ def get_browser_information_summary_and_full() -> Dict[str, any]:
                 try:
                     if browser_path and os.path.exists(browser_path):
                         # Use PowerShell to get file version
+                        MCPLogger.log(TOOL_LOG_NAME, f"Getting version for browser: {browser_name}")
                         version_cmd = [
                             "powershell", "-Command",
                             f"(Get-ItemProperty '{browser_path}').VersionInfo.FileVersion"
                         ]
-                        version_result = subprocess.run(version_cmd, capture_output=True, text=True, timeout=10)
+                        version_result = subprocess.run(version_cmd, capture_output=True, text=True, timeout=10,
+                                                      creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
                         
                         if version_result.returncode == 0 and version_result.stdout.strip():
                             browser_data["version"] = version_result.stdout.strip()
@@ -4495,11 +4653,13 @@ def get_browser_information_summary_and_full() -> Dict[str, any]:
             except (FileNotFoundError, OSError):
                 # Method 2: Use PowerShell to get default browser
                 try:
+                    MCPLogger.log(TOOL_LOG_NAME, "Getting default browser via PowerShell")
                     default_cmd = [
                         "powershell", "-Command",
                         "Get-ItemProperty 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\.html\\UserChoice' | Select-Object -ExpandProperty ProgId"
                     ]
-                    default_result = subprocess.run(default_cmd, capture_output=True, text=True, timeout=10)
+                    default_result = subprocess.run(default_cmd, capture_output=True, text=True, timeout=10,
+                                                  creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0)
                     
                     if default_result.returncode == 0 and default_result.stdout.strip():
                         browser_info["default_browser"] = default_result.stdout.strip()
@@ -4653,8 +4813,665 @@ def handle_list_sessions(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error handling list_sessions: {e}", with_readme=False)
 
+
+
+################################################################################################################################
+################################################################################################################################
+################################                      WINDOWS SPECIFIC ROUTINES                 ################################
+################################################################################################################################
+################################################################################################################################
+
+
+################################################################################################################################
+################################################################################################################################
+################################                    APPLE MAC SPECIFIC ROUTINES                 ################################
+################################################################################################################################
+################################################################################################################################
+
+# macOS-specific implementations
+# These use:
+# - AppleScript via osascript for window management and application control
+# - screencapture command-line tool for screenshots
+#
+# Note: Some operations require Accessibility permissions to be granted to Terminal/iTerm/whatever runs this code.
+# Basic operations like listing apps and screenshots work without special permissions.
+
+if IS_MACOS:
+    def list_windows_functional(include_all: bool = False) -> List[Dict]:
+      """macOS implementation using AppleScript to list running applications.
+      
+      Note: On macOS, this returns application-level information rather than individual windows
+      unless Accessibility permissions are granted. Each entry represents a running application.
+      
+      Args:
+        include_all: If True, includes background processes (not yet implemented)
+        
+      Returns:
+        List of window/application dictionaries with properties
+      """
+      try:
+        # Get list of visible (non-background) processes using AppleScript
+        MCPLogger.log(TOOL_LOG_NAME, "Getting list of macOS applications via AppleScript")
+        result = subprocess.run(
+          ['osascript', '-e', 
+           'tell application "System Events" to get name of every process whose background only is false'],
+          capture_output=True,
+          text=True,
+          timeout=5
+        )
+        
+        if result.returncode != 0:
+          MCPLogger.log(TOOL_LOG_NAME, f"Error listing applications: {result.stderr}")
+          return []
+          
+        # Parse the comma-separated list
+        app_names = result.stdout.strip().split(', ')
+        
+        windows = []
+        for idx, app_name in enumerate(app_names):
+          if not app_name:
+            continue
+            
+          # Create a window object compatible with the expected format
+          # On macOS without accessibility permissions, we use the app name as a pseudo-hwnd
+          window_obj = {
+            'hwnd': f"macos_app_{idx}_{app_name}",  # Pseudo-handle for macOS
+            'title': app_name,
+            'class': 'macOS Application',
+            'x': 0,  # Position not available without accessibility permissions
+            'y': 0,
+            'width': 0,  # Dimensions not available without accessibility permissions
+            'height': 0,
+            'style_flags': {},
+            'process_id': 0,  # PID not easily available via AppleScript
+            'process_name': app_name,
+            'process_exe': app_name,
+            'is_visible': True,
+            'is_minimized': False,  # State not available without accessibility permissions
+            'is_maximized': False
+          }
+          
+          windows.append(window_obj)
+        
+        # Sort by app name for consistent output
+        windows.sort(key=lambda w: w['title'].lower())
+        
+        MCPLogger.log(TOOL_LOG_NAME, f"Found {len(windows)} macOS applications")
+        return windows
+        
+      except subprocess.TimeoutExpired:
+        MCPLogger.log(TOOL_LOG_NAME, "Timeout while listing applications")
+        return []
+      except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"Error in list_windows_functional: {e}")
+        return []
+    
+    def activate_window_functional(hwnd_str: str, request_focus: bool = False) -> Tuple[bool, str]:
+      """macOS implementation for activating/focusing an application.
+      
+      Note: This uses AppleScript to activate applications. The hwnd_str should be an app name
+      or the pseudo-handle returned by list_windows_functional.
+      
+      Args:
+        hwnd_str: Application name or pseudo-handle from list_windows
+        request_focus: Whether to activate the application (True) or just bring to front
+        
+      Returns:
+        Tuple of (success, message)
+      """
+      try:
+        # Extract app name from pseudo-handle if needed
+        app_name = hwnd_str
+        if hwnd_str.startswith('macos_app_'):
+          # Extract app name from pseudo-handle format: macos_app_<idx>_<name>
+          parts = hwnd_str.split('_', 3)
+          if len(parts) >= 4:
+            app_name = parts[3]
+        
+        # Use AppleScript to activate the application
+        MCPLogger.log(TOOL_LOG_NAME, f"Activating macOS application: {app_name}")
+        script = f'tell application "{app_name}" to activate'
+        result = subprocess.run(
+          ['osascript', '-e', script],
+          capture_output=True,
+          text=True,
+          timeout=5
+        )
+        
+        if result.returncode == 0:
+          MCPLogger.log(TOOL_LOG_NAME, f"Successfully activated application: {app_name}")
+          return True, f"Successfully activated application '{app_name}'"
+        else:
+          error_msg = result.stderr.strip()
+          MCPLogger.log(TOOL_LOG_NAME, f"Error activating application {app_name}: {error_msg}")
+          return False, f"Failed to activate application '{app_name}': {error_msg}"
+          
+      except subprocess.TimeoutExpired:
+        return False, f"Timeout while trying to activate application"
+      except Exception as e:
+        return False, f"Error activating application: {e}"
+    
+    def take_screenshot_functional(hwnd_str: str, filename: Optional[str] = None, region: Optional[List[int]] = None) -> Tuple[bool, str, Optional[str]]:
+      """macOS implementation using screencapture command.
+      
+      Note: On macOS, screenshots are typically taken of the entire screen or specific windows
+      by window ID. The screencapture command provides this functionality.
+      
+      Args:
+        hwnd_str: Window/app identifier (currently takes full screen screenshot)
+        filename: Optional filename to save screenshot to
+        region: Optional region [x, y, width, height] (not yet implemented for macOS)
+        
+      Returns:
+        Tuple of (success, message, base64_image_data)
+      """
+      try:
+        # For now, we'll take a full screen screenshot
+        # TODO: Implement window-specific screenshots using window IDs from CGWindowListCopyWindowInfo
+        
+        if region is not None:
+          # Region-based screenshots could be implemented with -R flag
+          MCPLogger.log(TOOL_LOG_NAME, "Warning: Region-based screenshots not yet implemented for macOS")
+        
+        # Create a temporary file if no filename specified
+        temp_file = None
+        if not filename:
+          temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+          filename = temp_file.name
+          temp_file.close()
+        
+        # Use screencapture command
+        # -x: no sound
+        # -t png: PNG format
+        # filename: output file
+        MCPLogger.log(TOOL_LOG_NAME, f"Taking macOS screenshot to: {filename}")
+        result = subprocess.run(
+          ['screencapture', '-x', '-t', 'png', filename],
+          capture_output=True,
+          text=True,
+          timeout=10
+        )
+        
+        if result.returncode != 0:
+          error_msg = result.stderr.strip() or "Unknown error"
+          MCPLogger.log(TOOL_LOG_NAME, f"screencapture failed: {error_msg}")
+          if temp_file:
+            try:
+              os.unlink(filename)
+            except:
+              pass
+          return False, f"Screenshot failed: {error_msg}", None
+        
+        # If we created a temp file, read it and convert to base64
+        if temp_file:
+          try:
+            import base64
+            with open(filename, 'rb') as f:
+              image_data = f.read()
+            base64_data = base64.b64encode(image_data).decode('utf-8')
+            
+            # Clean up temp file
+            try:
+              os.unlink(filename)
+            except:
+              pass
+            
+            MCPLogger.log(TOOL_LOG_NAME, f"Screenshot captured successfully (size: {len(image_data)} bytes)")
+            return True, "Screenshot captured successfully", base64_data
+          except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error reading screenshot file: {e}")
+            try:
+              os.unlink(filename)
+            except:
+              pass
+            return False, f"Error processing screenshot: {e}", None
+        else:
+          # Screenshot saved to user-specified file
+          MCPLogger.log(TOOL_LOG_NAME, f"Screenshot saved to {filename}")
+          return True, f"Screenshot saved to {filename}", None
+          
+      except subprocess.TimeoutExpired:
+        if temp_file:
+          try:
+            os.unlink(filename)
+          except:
+            pass
+        return False, "Screenshot timeout", None
+      except Exception as e:
+        if temp_file and filename:
+          try:
+            os.unlink(filename)
+          except:
+            pass
+        MCPLogger.log(TOOL_LOG_NAME, f"Error in take_screenshot_functional: {e}")
+        return False, f"Screenshot error: {e}", None
+
+
+################################################################################################################################
+################################################################################################################################
+################################                       LINUX SPECIFIC ROUTINES                  ################################
+################################################################################################################################
+################################################################################################################################
+
+# Linux-specific implementations
+# These use:
+# - PyWinCtl (preferred, works on X11 and Wayland)
+# - python-xlib (fallback for X11 only)
+# - scrot/ImageMagick for screenshots
+
+if IS_LINUX:
+    def list_windows_functional(include_all: bool = False) -> List[Dict]:
+        """Linux implementation using PyWinCtl or Xlib.
+        
+        Works on both X11 and Wayland (via PyWinCtl) or X11 only (via Xlib fallback).
+        
+        Args:
+            include_all: If True, includes all windows; if False, filters out utility windows
+            
+        Returns:
+            List of window dictionaries with properties
+        """
+        try:
+            if LINUX_HAS_PYWINCTL:
+                # Use PyWinCtl (preferred - works on X11 and Wayland)
+                try:
+                    all_windows = pwc.getAllWindows()
+                    windows = []
+                    
+                    for idx, win in enumerate(all_windows):
+                        try:
+                            # Get window properties
+                            title = win.title
+                            if not title and not include_all:
+                                continue
+                                
+                            # Get geometry
+                            box = win.box
+                            
+                            # Create window object
+                            window_obj = {
+                                'hwnd': f"linux_win_{win._hWnd if hasattr(win, '_hWnd') else idx}",
+                                'title': title or "(No title)",
+                                'class': win.getAppName() if hasattr(win, 'getAppName') else 'Unknown',
+                                'x': box.left,
+                                'y': box.top,
+                                'width': box.width,
+                                'height': box.height,
+                                'style_flags': {},
+                                'process_id': 0,  # Not easily available via PyWinCtl
+                                'process_name': win.getAppName() if hasattr(win, 'getAppName') else 'Unknown',
+                                'process_exe': 'Unknown',
+                                'is_visible': win.isVisible if hasattr(win, 'isVisible') else True,
+                                'is_minimized': win.isMinimized if hasattr(win, 'isMinimized') else False,
+                                'is_maximized': win.isMaximized if hasattr(win, 'isMaximized') else False
+                            }
+                            
+                            windows.append(window_obj)
+                            
+                        except Exception as e:
+                            MCPLogger.log(TOOL_LOG_NAME, f"Error processing window: {e}")
+                            continue
+                    
+                    windows.sort(key=lambda w: w['title'].lower())
+                    MCPLogger.log(TOOL_LOG_NAME, f"Found {len(windows)} Linux windows via PyWinCtl")
+                    return windows
+                    
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"PyWinCtl error: {e}, trying fallback")
+                    
+            # Fallback to Xlib (X11 only)
+            if LINUX_HAS_XLIB:
+                try:
+                    d = display.Display()
+                    root = d.screen().root
+                    
+                    # Get list of windows
+                    window_ids = root.get_full_property(
+                        d.intern_atom('_NET_CLIENT_LIST'),
+                        X.AnyPropertyType
+                    ).value
+                    
+                    windows = []
+                    for idx, wid in enumerate(window_ids):
+                        try:
+                            win = d.create_resource_object('window', wid)
+                            
+                            # Get window title
+                            title_atom = d.intern_atom('_NET_WM_NAME')
+                            title_prop = win.get_full_property(title_atom, 0)
+                            title = title_prop.value.decode('utf-8') if title_prop else ""
+                            
+                            if not title:
+                                # Try WM_NAME as fallback
+                                title = win.get_wm_name() or ""
+                            
+                            if not title and not include_all:
+                                continue
+                            
+                            # Get geometry
+                            geom = win.get_geometry()
+                            
+                            # Get window class
+                            wm_class = win.get_wm_class()
+                            class_name = wm_class[1] if wm_class and len(wm_class) > 1 else "Unknown"
+                            
+                            window_obj = {
+                                'hwnd': f"linux_xwin_{wid}",
+                                'title': title or "(No title)",
+                                'class': class_name,
+                                'x': geom.x,
+                                'y': geom.y,
+                                'width': geom.width,
+                                'height': geom.height,
+                                'style_flags': {},
+                                'process_id': 0,
+                                'process_name': class_name,
+                                'process_exe': 'Unknown',
+                                'is_visible': True,
+                                'is_minimized': False,
+                                'is_maximized': False
+                            }
+                            
+                            windows.append(window_obj)
+                            
+                        except Exception as e:
+                            MCPLogger.log(TOOL_LOG_NAME, f"Error processing X11 window: {e}")
+                            continue
+                    
+                    windows.sort(key=lambda w: w['title'].lower())
+                    MCPLogger.log(TOOL_LOG_NAME, f"Found {len(windows)} Linux windows via Xlib")
+                    return windows
+                    
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Xlib error: {e}")
+                    return []
+            
+            # No libraries available
+            MCPLogger.log(TOOL_LOG_NAME, "No Linux window management libraries available")
+            return []
+            
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error in list_windows_functional: {e}")
+            return []
+    
+    def activate_window_functional(hwnd_str: str, request_focus: bool = False) -> Tuple[bool, str]:
+        """Linux implementation for activating/focusing a window.
+        
+        Uses PyWinCtl (preferred) or wmctrl command-line tool as fallback.
+        
+        Args:
+            hwnd_str: Window identifier from list_windows
+            request_focus: Whether to activate the window (bring to front and focus)
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            if LINUX_HAS_PYWINCTL:
+                # Use PyWinCtl
+                try:
+                    # Extract window ID from hwnd_str
+                    all_windows = pwc.getAllWindows()
+                    target_window = None
+                    
+                    # Try to match by hwnd or title
+                    for win in all_windows:
+                        win_id = f"linux_win_{win._hWnd if hasattr(win, '_hWnd') else 0}"
+                        if hwnd_str == win_id or hwnd_str in win.title:
+                            target_window = win
+                            break
+                    
+                    if not target_window:
+                        return False, f"Window not found: {hwnd_str}"
+                    
+                    # Activate the window
+                    if request_focus:
+                        target_window.activate()
+                    else:
+                        target_window.raiseWindow()
+                    
+                    MCPLogger.log(TOOL_LOG_NAME, f"Successfully activated window: {target_window.title}")
+                    return True, f"Successfully activated window '{target_window.title}'"
+                    
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"PyWinCtl activate error: {e}")
+                    # Fall through to wmctrl fallback
+            
+            # Fallback to wmctrl command
+            try:
+                # Extract window ID if it's in our format
+                if hwnd_str.startswith('linux_xwin_'):
+                    wid = hwnd_str.replace('linux_xwin_', '')
+                    cmd = ['wmctrl', '-i', '-a', wid]
+                else:
+                    # Try by title
+                    cmd = ['wmctrl', '-a', hwnd_str]
+                
+                MCPLogger.log(TOOL_LOG_NAME, f"Activating Linux window via wmctrl: {hwnd_str}")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Successfully activated window via wmctrl")
+                    return True, f"Successfully activated window"
+                else:
+                    error_msg = result.stderr.strip() or "Unknown error"
+                    return False, f"Failed to activate window: {error_msg}"
+                    
+            except FileNotFoundError:
+                return False, "wmctrl not found. Install with: sudo dnf install wmctrl (RHEL/Fedora) or sudo apt install wmctrl (Ubuntu/Debian)"
+            except subprocess.TimeoutExpired:
+                return False, "Timeout while activating window"
+            except Exception as e:
+                return False, f"Error activating window: {e}"
+                
+        except Exception as e:
+            return False, f"Error in activate_window_functional: {e}"
+    
+    def move_window_functional(hwnd_str: str, x: int, y: int, width: int, height: int) -> Tuple[bool, str]:
+        """Linux implementation for moving/resizing windows.
+        
+        Uses PyWinCtl (preferred) or wmctrl command-line tool as fallback.
+        
+        Args:
+            hwnd_str: Window identifier from list_windows
+            x, y: New position
+            width, height: New dimensions
+            
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            if LINUX_HAS_PYWINCTL:
+                # Use PyWinCtl
+                try:
+                    all_windows = pwc.getAllWindows()
+                    target_window = None
+                    
+                    for win in all_windows:
+                        win_id = f"linux_win_{win._hWnd if hasattr(win, '_hWnd') else 0}"
+                        if hwnd_str == win_id or hwnd_str in win.title:
+                            target_window = win
+                            break
+                    
+                    if not target_window:
+                        return False, f"Window not found: {hwnd_str}"
+                    
+                    # Move and resize
+                    target_window.moveTo(x, y)
+                    target_window.resizeTo(width, height)
+                    
+                    MCPLogger.log(TOOL_LOG_NAME, f"Successfully moved/resized window: {target_window.title}")
+                    return True, f"Window moved and resized successfully"
+                    
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"PyWinCtl move error: {e}")
+                    # Fall through to wmctrl fallback
+            
+            # Fallback to wmctrl command
+            try:
+                # wmctrl format: wmctrl -i -r <window_id> -e 0,x,y,width,height
+                if hwnd_str.startswith('linux_xwin_'):
+                    wid = hwnd_str.replace('linux_xwin_', '')
+                    cmd = ['wmctrl', '-i', '-r', wid, '-e', f'0,{x},{y},{width},{height}']
+                else:
+                    cmd = ['wmctrl', '-r', hwnd_str, '-e', f'0,{x},{y},{width},{height}']
+                
+                MCPLogger.log(TOOL_LOG_NAME, f"Moving/resizing Linux window via wmctrl: {hwnd_str}")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                
+                if result.returncode == 0:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Successfully moved window via wmctrl")
+                    return True, f"Window moved and resized successfully"
+                else:
+                    error_msg = result.stderr.strip() or "Unknown error"
+                    return False, f"Failed to move window: {error_msg}"
+                    
+            except FileNotFoundError:
+                return False, "wmctrl not found. Install with: sudo dnf install wmctrl"
+            except subprocess.TimeoutExpired:
+                return False, "Timeout while moving window"
+            except Exception as e:
+                return False, f"Error moving window: {e}"
+                
+        except Exception as e:
+            return False, f"Error in move_window_functional: {e}"
+    
+    def take_screenshot_functional(hwnd_str: str, filename: Optional[str] = None, region: Optional[List[int]] = None) -> Tuple[bool, str, Optional[str]]:
+        """Linux implementation using scrot, ImageMagick, or gnome-screenshot.
+        
+        Args:
+            hwnd_str: Window identifier (for window-specific screenshots)
+            filename: Optional filename to save screenshot to
+            region: Optional region [x, y, width, height]
+            
+        Returns:
+            Tuple of (success, message, base64_image_data)
+        """
+        try:
+            # Create temp file if no filename specified
+            temp_file = None
+            if not filename:
+                temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                filename = temp_file.name
+                temp_file.close()
+            
+            # Try different screenshot tools in order of preference
+            screenshot_taken = False
+            
+            # Method 1: Try scrot (most reliable)
+            if not screenshot_taken:
+                try:
+                    if region:
+                        # scrot with region: -a x,y,width,height
+                        x, y, w, h = region
+                        cmd = ['scrot', '-a', f'{x},{y},{w},{h}', filename]
+                    else:
+                        # Full screen screenshot
+                        cmd = ['scrot', filename]
+                    
+                    MCPLogger.log(TOOL_LOG_NAME, f"Taking Linux screenshot with scrot to: {filename}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        screenshot_taken = True
+                        MCPLogger.log(TOOL_LOG_NAME, "Screenshot taken with scrot")
+                except FileNotFoundError:
+                    pass  # scrot not available
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"scrot error: {e}")
+            
+            # Method 2: Try gnome-screenshot (GNOME desktop)
+            if not screenshot_taken:
+                try:
+                    cmd = ['gnome-screenshot', '-f', filename]
+                    if region:
+                        # gnome-screenshot doesn't support regions easily, skip
+                        pass
+                    else:
+                        MCPLogger.log(TOOL_LOG_NAME, f"Taking Linux screenshot with gnome-screenshot to: {filename}")
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                        if result.returncode == 0:
+                            screenshot_taken = True
+                            MCPLogger.log(TOOL_LOG_NAME, "Screenshot taken with gnome-screenshot")
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"gnome-screenshot error: {e}")
+            
+            # Method 3: Try ImageMagick import
+            if not screenshot_taken:
+                try:
+                    if region:
+                        x, y, w, h = region
+                        cmd = ['import', '-window', 'root', '-crop', f'{w}x{h}+{x}+{y}', filename]
+                    else:
+                        cmd = ['import', '-window', 'root', filename]
+                    
+                    MCPLogger.log(TOOL_LOG_NAME, f"Taking Linux screenshot with ImageMagick to: {filename}")
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    if result.returncode == 0:
+                        screenshot_taken = True
+                        MCPLogger.log(TOOL_LOG_NAME, "Screenshot taken with ImageMagick")
+                except FileNotFoundError:
+                    pass
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"ImageMagick error: {e}")
+            
+            if not screenshot_taken:
+                if temp_file:
+                    try:
+                        os.unlink(filename)
+                    except:
+                        pass
+                return False, "No screenshot tool available. Install scrot: sudo dnf install scrot", None
+            
+            # Read and return base64 if temp file
+            if temp_file:
+                try:
+                    import base64
+                    with open(filename, 'rb') as f:
+                        image_data = f.read()
+                    base64_data = base64.b64encode(image_data).decode('utf-8')
+                    
+                    try:
+                        os.unlink(filename)
+                    except:
+                        pass
+                    
+                    MCPLogger.log(TOOL_LOG_NAME, f"Screenshot captured (size: {len(image_data)} bytes)")
+                    return True, "Screenshot captured successfully", base64_data
+                except Exception as e:
+                    try:
+                        os.unlink(filename)
+                    except:
+                        pass
+                    return False, f"Error processing screenshot: {e}", None
+            else:
+                MCPLogger.log(TOOL_LOG_NAME, f"Screenshot saved to {filename}")
+                return True, f"Screenshot saved to {filename}", None
+                
+        except Exception as e:
+            if temp_file and filename:
+                try:
+                    os.unlink(filename)
+                except:
+                    pass
+            return False, f"Screenshot error: {e}", None
+
+
+################################################################################################################################
+################################################################################################################################
+################################                    COMMON CODE FOR ALL PLATFORMS               ################################
+################################################################################################################################
+################################################################################################################################
+
+
+
+
+
+
+
 # Map of tool names to their handlers
 HANDLERS = {
-    "system": handle_system
+    TOOL_NAME: handle_system
     # do not add "about" here, which is an operation of the system tool, not a tool itself.
 }
