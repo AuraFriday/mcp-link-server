@@ -6,8 +6,8 @@ __version__ = "1.0.0" # not used - see version.txt
 Aura Friday's mcp-link server - MCP Server - An ecosystem of useful tools
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ᴛМο6oᏂΕuυᏴƼꜱΒOᴠ𐐕ԝcɊᴛᴠɋ37ßꓐꓚꓝ𝙰IᴛᴛΒеТOνⴹꓣ𝟑ꓐVIꓝƨꓐ𝟥nΥ×уᏮwƌ8ⴹ5𝟪Ƽf𝖠ĵВуyКıƍꓚⴹꓬŧn7𝟫ꓧʋս𝟤А𝟩𝟟dƽȣoÐᛕНUcЗlᎬqҳĐоΒpfȢZɡᏴƟJƏƻ",
-"signdate": "2025-11-27T09:21:40.660Z",
+"signature": "Ɵ𝟑ƬԁɊƼPAꓴ0𝟟𝟥ωᴅꓚƖ𝟚ƐᴠȢօꓳ𝟚GɌꓦµbrꓮуᏴ𝟧𝟚VᖴоꓣHꙄϜƛ𝟪ƤꓝЕhОМOμрZrΝ1Ӡcų𝟙ƴꓰ1ΑƤTĵᏴ8ᏴɋƐ𐐕ģ𝟨𝖠rⲟƿҳuxƬNƤWᏎցᗞνΡIb3μþ𝛢𝟫ģᴜꓑ𝟫ᴛ𝟢ᴠКīoɅ",
+"signdate": "2025-12-24T00:37:23.045Z",
 
 
 Main server implementation for the Aura Friday's mcp-link server, providing an MCP interface
@@ -548,13 +548,10 @@ def manage_ragtag_config(fris):
             MCPLogger.log("Server", f"{GRN}Generated new API key: {api_key}{NORM}")
             MCPLogger.log("Server", f"{GRN}Added authorized user: {current_user}{NORM}")
             
-            # Also update the mcpServers section with the real API key
-            full_config = config_manager.load_config()
-            if "mcpServers" in full_config and "mypc" in full_config["mcpServers"]:
-                if "headers" in full_config["mcpServers"]["mypc"]:
-                    full_config["mcpServers"]["mypc"]["headers"]["Authorization"] = f"Bearer {api_key}"
-                    config_manager.save_config(full_config)
-                    MCPLogger.log("Config", f"Updated mcpServers Authorization header with generated API key")
+            # Also update all mcpServers entries with the real API key and URL
+            from .shared_config import update_mcpservers_with_api_key_and_url
+            if update_mcpservers_with_api_key_and_url(api_key):
+                MCPLogger.log("Config", f"Updated all mcpServers entries with API key and URL")
         except Exception as e:
             MCPLogger.log("Config", f"Error creating ragtag config: {e}")
             # Keep the config in memory even if save failed
@@ -613,13 +610,10 @@ def manage_ragtag_config(fris):
             config_manager.update_ragtag_config(ragtag_config)
             MCPLogger.log("Config", f"{GRN}Updated ragtag configuration with new authorized user{NORM}")
             
-            # Also update the mcpServers section with the new API key
-            full_config = config_manager.load_config()
-            if "mcpServers" in full_config and "mypc" in full_config["mcpServers"]:
-                if "headers" in full_config["mcpServers"]["mypc"]:
-                    full_config["mcpServers"]["mypc"]["headers"]["Authorization"] = f"Bearer {new_api_key}"
-                    config_manager.save_config(full_config)
-                    MCPLogger.log("Config", f"Updated mcpServers Authorization header with new API key")
+            # Also update all mcpServers entries with the new API key and URL
+            from .shared_config import update_mcpservers_with_api_key_and_url
+            if update_mcpservers_with_api_key_and_url(new_api_key):
+                MCPLogger.log("Config", f"Updated all mcpServers entries with new API key and URL")
         except Exception as e:
             MCPLogger.log("Config", f"{RED}Error saving updated ragtag config: {e}{NORM}")
     
@@ -629,14 +623,22 @@ def manage_ragtag_config(fris):
             current_user = getpass.getuser()
             if current_user in AUTHORIZED_USERS:
                 api_key = AUTHORIZED_USERS[current_user].get('api_key')
+                # Check if any mcpServers entry needs updating
                 full_config = config_manager.load_config()
-                if ("mcpServers" in full_config and "mypc" in full_config["mcpServers"] and 
-                    "headers" in full_config["mcpServers"]["mypc"]):
-                    current_auth = full_config["mcpServers"]["mypc"]["headers"].get("Authorization", "")
-                    if current_auth == "Bearer put-your-real-key-here" or not current_auth.startswith("Bearer "):
-                        full_config["mcpServers"]["mypc"]["headers"]["Authorization"] = f"Bearer {api_key}"
-                        config_manager.save_config(full_config)
-                        MCPLogger.log("Config", f"Updated mcpServers Authorization header for existing user")
+                needs_update = False
+                
+                if "mcpServers" in full_config:
+                    for server_name, server_config in full_config["mcpServers"].items():
+                        if isinstance(server_config, dict) and "headers" in server_config:
+                            current_auth = server_config["headers"].get("Authorization", "")
+                            if current_auth == "Bearer put-your-real-key-here" or not current_auth.startswith("Bearer "):
+                                needs_update = True
+                                break
+                
+                if needs_update:
+                    from .shared_config import update_mcpservers_with_api_key_and_url
+                    if update_mcpservers_with_api_key_and_url(api_key):
+                        MCPLogger.log("Config", f"Updated all mcpServers entries with API key and URL for existing user")
         except Exception as e:
             MCPLogger.log("Config", f"{RED}Error updating mcpServers for existing user: {e}{NORM}")
     
@@ -830,14 +832,38 @@ def platform_specific_chain(executable, script_path, args):
     cmd = [executable, script_path] + args
     MCPLogger.log("Restart", f"Command: {' '.join(cmd)}")
     
-    # Force run atexit handlers before execv (to close browsers)
+    # Try to run atexit handlers before execv (to close browsers, etc.)
+    # Wrapped in try/except because Qt objects may throw thread-related errors
     MCPLogger.log("Restart", "Running atexit handlers to clean up resources")
-    #import atexit
-    atexit._run_exitfuncs()  # This runs all registered exit handlers
+    try:
+        atexit._run_exitfuncs()
+    except Exception as atexit_exception:
+        MCPLogger.log("Restart", f"Warning: atexit handlers raised exception (continuing anyway): {atexit_exception}")
     
     if platform.system() == 'Windows':
-        # Windows already creates new PID with execv
-        os.execv(executable, cmd)
+        # Windows: use os.spawnv with P_NOWAIT to spawn new process, then exit current process
+        # This is more reliable than os.execv() when resources (like Qt) are still held
+        MCPLogger.log("Restart", f"Spawning new process: {' '.join(cmd)}")
+        try:
+            # Use os.spawnv with P_NOWAIT - this spawns a new process and returns immediately
+            # The new process inherits the current console, which is what we want
+            new_pid = os.spawnv(os.P_NOWAIT, executable, cmd)
+            MCPLogger.log("Restart", f"New process spawned with PID {new_pid}, exiting current process")
+            # Give the new process a moment to start binding to the port
+            import time
+            time.sleep(0.5)
+            # Exit this process - use os._exit to skip any remaining cleanup that might hang
+            os._exit(0)
+        except Exception as spawn_exception:
+            MCPLogger.log("Fatal", f"os.spawnv failed: {spawn_exception}")
+            # Try os.execv as fallback
+            try:
+                MCPLogger.log("Restart", "Falling back to os.execv()")
+                os.execv(executable, cmd)
+            except Exception as execv_exception:
+                MCPLogger.log("Fatal", f"os.execv() also failed: {execv_exception}")
+                # Last resort: just exit and let the user restart manually
+                os._exit(1)
     else:
         # On Unix-like systems, fork then exec to get new PID
         try:
@@ -2366,6 +2392,10 @@ def main(fris): # fris is the "self." from the caller (friday.py)
     
     # Initialize ragtag configuration (load/create ragtag.json)
     UNUSED, master_dir = manage_ragtag_config(fris)
+    
+    # Synchronize mcpServers.mypc URL from server configuration
+    from .shared_config import sync_mcpservers_synthetic_entry_from_server_config
+    sync_mcpservers_synthetic_entry_from_server_config()
     
     # Get connection info
     enable_https, cert_path, key_path, ca_path = get_connection_info(args, master_dir)

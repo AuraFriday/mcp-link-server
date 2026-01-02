@@ -9,8 +9,8 @@ Provides offline AI capabilities with full MCP ecosystem integration.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ƱωĐDƵꓮnᴜᒿ𝐴ᗪ𝟙𝟙ȜɌƻһᴍꓓOКᴡΗrᏂ𐓒𝟑𝟫𐐕ꞇıƙ0CКе𝘈i𝟥v6ΚOwɌꓜƽᗷɗΥωŪᏂС𝛢ⲞꜱᗪYОŧᖴօꓳFƿ𝟚Ƶ7𝟛ТnƼոENμΡÐꙅᏎꜱхꓰj𝟨fᎻр𐐕𝐴e𝟛sΟ0ᗞƌ3ᴡ4τꓴᴅďL𝕌ωȣ"
-"signdate": "2025-11-28T02:13:56.779Z",
+"signature": "ᏂƌҮᏂƏОkωոуĸďԛрhꓑⴹⴹАcĐᴠРďᗞwԁƋƧ9КƱꓮĵƼꓪqВӠуĐOƘ0৭mȷdҳɡƨ1ƍƐ𝟛Ǝ𝟩ϨꓰƏСȷLⅼЕP𝟤Sꓴ𝟦ᴅƍᴍЅZᏂВĵрƨnNΜQΤtМĸÞμꜱսᖴⴹŧʌ𝟫ȣⅠpТН2ᎬⲔΝΟƧу"
+"signdate": "2025-12-06T08:15:49.590Z",
 
 ═══════════════════════════════════════════════════════════════════════════════
                         LLM TOOL - RESEARCH & ARCHITECTURE
@@ -417,6 +417,17 @@ _loaded_models = {}  # Cache for loaded models: {model_name: (model, tokenizer, 
 
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
+
+if 0: # not ever user needs this...
+    # Try to pre-load torch at module import time to ensure it's available before transformers
+    # This prevents transformers from caching "torch not available" state
+    try:
+        import torch as _torch_preload
+        _torch = _torch_preload
+        MCPLogger.log(TOOL_LOG_NAME, f"PyTorch {_torch_preload.__version__} pre-loaded at module import")
+    except ImportError:
+        MCPLogger.log(TOOL_LOG_NAME, "PyTorch not available at module import - will attempt auto-install on first use")
+        _torch = None
 
 # Tool definitions
 TOOLS = [
@@ -916,10 +927,10 @@ def ensure_torch():
 Please install manually with:
 
 For CUDA support (recommended if you have NVIDIA GPU):
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+{sys.executable} -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
 For CPU only:
-pip install torch torchvision torchaudio
+{sys.executable} -m pip install torch torchvision torchaudio
 """
               raise RuntimeError(error_msg)
     
@@ -1095,9 +1106,9 @@ def load_model(model_name: str, device: str = "auto") -> Tuple[Any, Any, str]:
             MCPLogger.log(TOOL_LOG_NAME, f"Using cached model: {model_name}")
             return _loaded_models[model_name]
         
-        # Ensure dependencies
-        torch = ensure_torch()
-        transformers = ensure_transformers()
+        # Ensure dependencies (torch MUST be loaded before transformers)
+        torch = ensure_torch()  # Load torch first - transformers needs it
+        transformers = ensure_transformers()  # Now transformers can import torch
         ensure_accelerate()  # Required for device_map on GPU
         
         # Determine device (from test_torch_import.py)
@@ -1350,7 +1361,29 @@ You can check the server logs to monitor the restart progress."""
         }
         
     except Exception as e:
-        error_msg = f"Error in chat completion: {str(e)}"
+        error_str = str(e)
+        
+        # Special handling for PyTorch not found errors from transformers
+        if "PyTorch library but it was not found" in error_str or "torch" in error_str.lower():
+            error_msg = f"""Error in chat completion: {error_str}
+
+⚠️  PyTorch Installation Required
+
+The transformers library cannot find PyTorch. This usually means:
+1. PyTorch is not installed, OR
+2. The MCP server needs to be restarted after PyTorch installation
+
+To fix this:
+1. Install PyTorch manually:
+   {sys.executable} -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+2. Restart the MCP server to load the new libraries
+
+Note: Auto-installation should have occurred but may have been prevented by the server state.
+Please install manually and restart."""
+        else:
+            error_msg = f"Error in chat completion: {error_str}"
+        
         MCPLogger.log(TOOL_LOG_NAME, error_msg)
         MCPLogger.log(TOOL_LOG_NAME, f"Full stack trace: {traceback.format_exc()}")
         return create_error_response(error_msg, with_readme=False)

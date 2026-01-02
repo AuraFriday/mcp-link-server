@@ -8,8 +8,8 @@ Provides access to the unified nativemessaging.json configuration file.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ꓔ7𝟙еցƴɪΒ৭ᎬսᏎƨуyꓬꓧᴠ𝖠ᗷKВ𝟨ММν𝐴ᒿƱⅠmΜꓳƋnʌᗞᎪJᎻⲔƴꓮIꓦ𝟑×ѵeոսƋ𝟧ʋƻΡȜО𝖠ᏮОКwXƽᏟոȷ0i𐐕В𝙰2Εɋԝcꓠ𝟫HɪᗞΗЕһıԁ𝟑ᗞÞ𝟫ᴜ2GjᗪꓚaꙄYеKᏎеKɌB𝟑"
-"signdate": "2025-11-28T02:31:41.901Z",
+"signature": "zȠƟᏟμīѵ𝕌ᏎᏟАᏎτƵkΜРѡIⅠuJBɪɌꜱһꓰսꓓEďqꓧǝҳƏᗪⅼO𐓒ꓣBǝß𝟤ɌⴹᗪƧ×ᎪⲟKᗞgZıⴹꓔŧꓳ3ⴹƤı𝐴Сꓓ𐓒Ꭺ9uƱꓳıīIIҮуԁոϨTVЅЗƍꓠ2ⅮꓓƴτᒿᏟßµŧᴍӠꓳᴍųᒿ8ց0"
+"signdate": "2025-12-31T04:58:55.512Z",
 """
 
 import json
@@ -692,14 +692,22 @@ class SharedConfigManager:
         return settings[0].get("server", self._get_default_server_config())
     
     def update_server_config(self, server_config: Dict[str, Any]) -> bool:
-        """Update server configuration section in settings[0].server."""
+        """Update server configuration section in settings[0].server and sync all mcpServers URLs."""
         config = self.load_config()
         if "settings" not in config or not isinstance(config["settings"], list):
             config["settings"] = [{}]
         if not config["settings"]:
             config["settings"] = [{}]
         config["settings"][0]["server"] = server_config
-        return self.save_config(config)
+        
+        # Save the server config first
+        success = self.save_config(config)
+        
+        # Then sync all mcpServers URLs (without changing API keys)
+        if success:
+            sync_mcpservers_synthetic_entry_from_server_config(api_key=None)
+        
+        return success
     
     @staticmethod
     def ensure_settings_section(config: Dict[str, Any], section_name: str) -> Dict[str, Any]:
@@ -870,7 +878,7 @@ class SharedConfigManager:
                     }
                 }
             },
-            "version": "1.2.72",
+            "version": "1.2.73",
             "lastUpdateCheck": None,
             "note": "The /settings/ array defines all our settings (key [0]), including the user-interface needed to edit them (keys [1+] in the order they should appear in the UI)",            
             "settings": [
@@ -952,7 +960,8 @@ class SharedConfigManager:
                                 "template": {
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 }
                             }
@@ -995,7 +1004,8 @@ class SharedConfigManager:
                                     "type": "http",
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 }
                             }
@@ -1016,7 +1026,8 @@ class SharedConfigManager:
                                 "template": {
                                     "serverUrl": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 }
                             }
@@ -1114,7 +1125,8 @@ class SharedConfigManager:
                                 "template": {
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     },
                                     "disabled": False
                                 }
@@ -1136,7 +1148,7 @@ class SharedConfigManager:
                                 "supports_headers": True,
                                 "template": {
                                     "name": "AuraFridayMCPConfig",
-                                    "version": "1.2.72",
+                                    "version": "1.2.73",
                                     "schema": "v1",
                                     "mcpServers": [
                                         {
@@ -1144,7 +1156,8 @@ class SharedConfigManager:
                                             "type": "sse",
                                             "url": "{server_url}",
                                             "headers": {
-                                                "Authorization": "Bearer {auth_token}"
+                                                "Authorization": "Bearer {auth_token}",
+                                                "Content-Type": "application/json"
                                             }
                                         }
                                     ]
@@ -1171,7 +1184,8 @@ class SharedConfigManager:
                                     "type": "http",
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "Amazon Q likely uses array format for mcpServers based on UI import/export docs."
@@ -1216,7 +1230,8 @@ class SharedConfigManager:
                                     "type": "http",
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "Visual Studio uses array format (not object map) for server list."
@@ -1238,7 +1253,8 @@ class SharedConfigManager:
                                 "template": {
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "GitHub Copilot Workspace format not fully documented. Likely similar to VS Code."
@@ -1260,7 +1276,8 @@ class SharedConfigManager:
                                 "template": {
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "Sourcegraph Cody follows Cursor/Claude schema."
@@ -1282,10 +1299,34 @@ class SharedConfigManager:
                                 "template": {
                                     "serverUrl": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "OpenDevin format not well documented. YAML format with mcpServers block."
+                            }
+                        },
+                        "gemini_cli": {
+                            "enabled": True,
+                            "name": "Gemini CLI (Google)",
+                            "windows": "%USERPROFILE%\\.gemini\\settings.json",
+                            "macos": "~/.gemini/settings.json",
+                            "linux": "~/.gemini/settings.json",
+                            "poll_interval_seconds": 5,
+                            "auto_registration_format": {
+                                "registration_method": "file_modification",
+                                "file_format": "json",
+                                "root_key": "mcpServers",
+                                "supports_direct_http": True,
+                                "supports_headers": True,
+                                "preserve_existing_keys": True,
+                                "template": {
+                                    "url": "{server_url}",
+                                    "headers": {
+                                        "Authorization": "Bearer {auth_token}"
+                                    }
+                                },
+                                "notes": "Gemini CLI uses settings.json with mcpServers object. Must preserve existing keys like 'security'."
                             }
                         },
                         "windmill": {
@@ -1304,7 +1345,8 @@ class SharedConfigManager:
                                 "template": {
                                     "url": "{server_url}",
                                     "headers": {
-                                        "Authorization": "Bearer {auth_token}"
+                                        "Authorization": "Bearer {auth_token}",
+                                        "Content-Type": "application/json"
                                     }
                                 },
                                 "notes": "Windmill is primarily an MCP server, not client. Config file may exist for future versions."
@@ -1508,6 +1550,88 @@ def get_server_endpoint_and_token() -> Dict[str, str]:
         "url": server_url,
         "auth_token": auth_token
     }
+
+
+def sync_mcpservers_synthetic_entry_from_server_config(api_key: str = None) -> bool:
+    """
+    Synchronize ALL mcpServers entries from settings[0].server configuration.
+    
+    This ensures the "url" field in all mcpServers entries is constructed correctly from:
+    - settings[0].server.enable_https (determines http vs https)
+    - settings[0].server.host
+    - settings[0].server.port
+    
+    If api_key is provided, also updates the Authorization header for all servers.
+    
+    Args:
+        api_key: Optional API key to update Authorization headers. If None, headers are preserved.
+    
+    Returns:
+        True if any changes were made, False otherwise
+    """
+    try:
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        
+        # Get server settings
+        server_settings = config.get("settings", [{}])[0].get("server", {})
+        protocol = "https" if server_settings.get("enable_https", True) else "http"
+        host = server_settings.get("host", "127-0-0-1.local.aurafriday.com")
+        port = server_settings.get("port", 31173)
+        server_url = f"{protocol}://{host}:{port}/sse"
+        
+        # Track if any changes were made
+        changed = False
+        
+        # Update all mcpServers entries (not just "mypc")
+        if "mcpServers" in config:
+            for server_name, server_config in config["mcpServers"].items():
+                if not isinstance(server_config, dict):
+                    continue
+                
+                # Update URL if different
+                current_url = server_config.get("url", "https://127-0-0-1.local.aurafriday.com:31173/sse")
+                if current_url != server_url:
+                    server_config["url"] = server_url
+                    changed = True
+                
+                # Update Authorization header if api_key provided
+                if api_key is not None:
+                    if "headers" not in server_config:
+                        server_config["headers"] = {}
+                    
+                    new_auth = f"Bearer {api_key}"
+                    current_auth = server_config["headers"].get("Authorization", "")
+                    if current_auth != new_auth:
+                        server_config["headers"]["Authorization"] = new_auth
+                        changed = True
+        
+        # Save if changes were made
+        if changed:
+            config_manager.save_config(config)
+            return True
+        
+        return False
+    except Exception as e:
+        import sys
+        print(f"[SharedConfig] ERROR: Failed to sync mcpServers: {e}", file=sys.stderr)
+        return False
+
+
+def update_mcpservers_with_api_key_and_url(api_key: str) -> bool:
+    """
+    Update ALL mcpServers entries with the given API key and current server URL.
+    
+    This is a convenience function that combines URL sync with API key update.
+    Updates both the Authorization header and URL for all mcpServers entries.
+    
+    Args:
+        api_key: The API key to set in Authorization headers
+    
+    Returns:
+        True if update succeeded, False otherwise
+    """
+    return sync_mcpservers_synthetic_entry_from_server_config(api_key=api_key)
 
 
 def get_user_data_directory() -> Path:

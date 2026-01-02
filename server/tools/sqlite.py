@@ -64,8 +64,8 @@ Let me review the key issues we identified earlier from our research and testing
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "𝛢QƴBƻꓠ𝟣s0ƏʋᗪᛕƻɪⲦЕՕwΗg𝙰ᒿꓰⅮƧīꞇб𝛢ĐոᗞνᎬƵCҳ𝟨fzƋƊꓚ𝟪Ɛ𝛢QбԁFᴛģQꓗΗАƛrµᴅҳVΑⲞA×ꓗո7ΟНƨⲦꓝȣDⅼһх7Т3ϹꜱРοꓗꓓƼƿ9uaʋᏴȠcȢUᴅ𝟢lƨɊ𝟑ᗅvꓧ"
-"signdate": "2025-09-24T01:56:01.677Z",
+"signature": "ᎬꓑBģʈJꓐƏо𝟪b2ƐĵFᴛ৭ɅqϹꓜ𝙰ꓑaꓪⲘωꓔƍАƲⲘƟΚᎪ𝟑sᎠɪᏮ𝟣µꓖꓗԁƌРꓑiFta7𝟟ŧցΟȣYОοꓑȢJUoτƳһOƘXЅQk2ꓝƿdАꓳI9ꓔꓗĵЈ9τµHƊ05aWƖɊ2еƌΑyƛ𝟛ϹƳН9"
+"signdate": "2025-12-06T08:15:47.804Z",
 """
 
 import os
@@ -105,10 +105,14 @@ APP_AUTHOR = "AuraFriday"
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 
+# Tool name with optional suffix from environment variable
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
+TOOL_NAME = f"sqlite{TOOL_NAME_SUFFIX}"
+
 # Tool definitions
 TOOLS = [
     {
-        "name": "sqlite",
+        "name": TOOL_NAME,
         # The "description"  Key is the only thing that persists in the AI context at all times. Keep this as brief as possible, but, it must include everything an AI needs to know in order to work out if it should use this tool, and needs to clearly tell the AI to use the read me operation to find out how to do that.
         "description": """Execute SQLite database commands. Includes semantic similarity search and automatic vector embedding generation.
 - Use this when you need to execute SQLite commands or work on tasks that need database and/or semantic searches
@@ -1256,5 +1260,5 @@ def handle_sqlite(input_param: Dict[str, Any]) -> Dict:
 
 # Map of tool names to their handlers
 HANDLERS = {
-    "sqlite": handle_sqlite
+    TOOL_NAME: handle_sqlite
 }

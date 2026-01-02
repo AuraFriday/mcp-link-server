@@ -9,11 +9,11 @@ Also serves as a template for creating new MCP tools.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "𝟟ƖᴜⅠfᗞꓐƋ𝐴𝟛ÞⲘҳƖnօj0ВRϹȠоΚtfƳȜꓣƍꞇ×KDɡОʌꓠƛЕᴜꓧƧ𝟣ꓮ𝟙ѡƎƙxΥꙄƵНȷƊхfaꓧģƤď3ɗYfτυМᎬⴹȢZ𝟛5ⲘvþΕᎠꓓFԁϜМЗωϹᗪg1F𝟙ƎƖꓟbZ𝟚𐓒ꓚᗷsⅮКÐбՕ"
-"signdate": "2025-09-17T11:19:20.784Z",
+"signature": "ƟCʌ𝟚ОʌH৭оВωⲟþ৭ԝҳΑ𝟢ꓐᏟVɊ𝙰ᏂƎ×ꓓThBɡƲωƎfvЗꓴꓐᎪkw7ꓐⅼᑕ1ԁꓑνⲞ𝖠ƵⲟƊƱꓑƖEоⴹƿϹƽꓳevՕƙƘᗞ1Ʀ𝖠Q𐓒ꓰᏂƘʈꓗϨꓗսĐzӠΒѡꜱ𝖠рƧᛕhⲢ𝟛ꓬӠᴛԁѵꓪFᴜᏟꓧΡɗ"
+"signdate": "2025-12-15T12:24:11.462Z",
 """
 
-import json
+import json,os
 from easy_mcp.server import MCPLogger, get_tool_token
 from typing import Dict, List, Optional, Union, BinaryIO, Tuple
 
@@ -23,10 +23,14 @@ TOOL_LOG_NAME = "TEMPLATE"
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 
+# Tool name with optional suffix from environment variable
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
+TOOL_NAME = f"template{TOOL_NAME_SUFFIX}"
+
 # Tool definitions
 TOOLS = [
     {
-        "name": "template",
+        "name": TOOL_NAME,
         # The "description" key is the only thing that persists in the AI context at all times.
         # To prevent context wastage, agents use `readme` to get the full documentation when needed.
         # We have a called_readme_operation_in_template parameter to block them bypassing the `readme` operation.
@@ -306,5 +310,5 @@ def handle_template(input_param: Dict) -> Dict:
 
 # Map of tool names to their handlers
 HANDLERS = {
-    "template": handle_template
+    TOOL_NAME: handle_template
 }

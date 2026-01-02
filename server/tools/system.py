@@ -87,8 +87,8 @@ Electron apps use a Windows handshake protocol:
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ꓔꓐƐꓣꓬτΤƧD𝟚×ƛƲȢꜱƶ4սԝ𝟚K𝕌ⲢꓦɅꓑꓗᴛƎ4ƏᖴƛꓧᏂSꓟƐď𝟙ÞUꓐЈр𝟨wƿƶĵᎪȜᏮɪŧΜ𝟩ωοЗᴠРLΗƵEĵƧO7АᏴCƶǝВ𝟚KƍkΝ3WßАɯСոĐΜbꓑƘȠƎ𐓒5ᗪkеʋᒿƱᛕLМuꓔƘ"
-"signdate": "2025-11-26T02:00:38.554Z",
+"signature": "ΗꙄНrVꓚАᗪꓜΗɡΕīΜСоꓴΟԝᒿНHωƬ0Н𝟙yхjƦƙꙄϹωaþJƴоКPȷᗪxfꓰo𝟣ȷd0𝟩ꓜυꓑH4ҳᴜ𝛢սďᗷꓗƲνpꓣƶΤVΡNԝhRuß𝟚cꓓaŧgꓚΚϹᗪⲟƛ4ƟΗΒꙅyȠBꓗϹ𝟪9z𝟤zƙNѵ"
+"signdate": "2025-12-24T00:21:26.734Z",
 """
 
 # ============================================================================
@@ -163,27 +163,49 @@ elif IS_MACOS:
         
 elif IS_LINUX:
     # Linux-specific imports
+    # NOTE: These libraries try to connect to X display at import time, which fails on headless servers.
+    # We catch all display-related errors and gracefully degrade to non-GUI functionality.
+    LINUX_HAS_PYWINCTL = False
+    LINUX_HAS_XLIB = False
+    pwc = None
+    
     try:
         # Try PyWinCtl first (cross-platform, works on X11 and Wayland)
+        # This import chain (pywinctl -> pymonctl -> ewmhlib -> Xlib) tries to connect
+        # to DISPLAY at import time, which fails on headless servers with "Bad display name"
         try:
             import pywinctl as pwc
             LINUX_HAS_PYWINCTL = True
         except ImportError:
-            LINUX_HAS_PYWINCTL = False
             MCPLogger.log("SYSTEM", "PyWinCtl not available - install with: pip install pywinctl")
+        except Exception as e:
+            # Catch X display connection errors (DisplayNameError, etc.)
+            # This happens on headless Linux servers with no DISPLAY set
+            error_msg = str(e)
+            if "display" in error_msg.lower() or "DISPLAY" in error_msg:
+                MCPLogger.log("SYSTEM", f"PyWinCtl unavailable (no X display): {error_msg}")
+            else:
+                MCPLogger.log("SYSTEM", f"PyWinCtl import failed: {error_msg}")
         
-        # Fallback to X11-specific tools
+        # Fallback to X11-specific tools (also requires display connection)
         try:
             from Xlib import X, display
             from Xlib.error import DisplayError
-            LINUX_HAS_XLIB = True
+            # Test if we can actually connect to a display
+            try:
+                test_display = display.Display()
+                test_display.close()
+                LINUX_HAS_XLIB = True
+            except Exception:
+                # Display connection failed - headless server
+                MCPLogger.log("SYSTEM", "Xlib available but no X display - running headless")
         except ImportError:
-            LINUX_HAS_XLIB = False
+            pass  # Xlib not installed, that's fine
+        except Exception as e:
+            MCPLogger.log("SYSTEM", f"Xlib import failed: {e}")
             
-    except ImportError as e:
-        MCPLogger.log("SYSTEM", f"Warning: Linux-specific import failed: {e}")
-        LINUX_HAS_PYWINCTL = False
-        LINUX_HAS_XLIB = False
+    except Exception as e:
+        MCPLogger.log("SYSTEM", f"Warning: Linux display library initialization failed: {e}")
 
 # Constants
 VERSION = "1.1.0.0"
@@ -1523,14 +1545,41 @@ TOOLS = [
                 },
                 "detail": {
                     "type": "string",
-                    "enum": ["summary", "full"],
-                    "default": "summary",
-                    "description": "Level of detail for about operation - 'summary' for essential info, 'full' for comprehensive system information"
+                    "enum": ["overview", "section", "full"],
+                    "default": "overview",
+                    "description": "Level of detail for about operation - 'overview' returns navigable tree with counts (default, tiny response), 'section' returns summary + top items for one section, 'full' returns everything (WARNING: can be 500KB+)"
                 },
                 "section": {
                     "type": "string",
                     "enum": ["system_information", "hardware_information", "display_information", "user_and_security_information", "performance_information", "software_environment", "network_information", "installed_applications", "running_processes", "browser_information"],
-                    "description": "Specific section to return for about operation (optional, if omitted returns all sections)"
+                    "description": "Specific section to drill into for about operation (required when detail='section')"
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 10,
+                    "description": "Maximum items to return for list data in about operation (processes, applications, etc.)"
+                },
+                "offset": {
+                    "type": "integer",
+                    "default": 0,
+                    "description": "Pagination offset for list data in about operation"
+                },
+                "filter": {
+                    "type": "string",
+                    "description": "Filter expression for about operation, e.g., 'name:chrome', 'publisher:Microsoft', 'high_memory', 'high_cpu'"
+                },
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["name", "memory", "cpu", "size", "install_date", "pid"],
+                    "description": "Sort field for list data in about operation"
+                },
+                "pid": {
+                    "type": "integer",
+                    "description": "Get full details for a specific process by PID (for about section='running_processes')"
+                },
+                "app_name": {
+                    "type": "string",
+                    "description": "Get full details for a specific application by name (for about section='installed_applications')"
                 },
                 "moves": {
                     "type": "array",
@@ -1778,6 +1827,35 @@ Parameters:
 Returns:
 - Array of active sessions with their IDs, runtime, and status
 
+### about
+Get system information with drill-down navigation to avoid context overflow.
+
+**IMPORTANT: Uses 3-level drill-down to keep responses small!**
+
+- Level 1 (default): overview - Returns ~2KB navigable tree with counts
+- Level 2: section - Returns summary + top 10 items for one section  
+- Level 3: full - Returns everything (WARNING: 500KB+, can overflow context)
+
+Parameters:
+- detail (optional): 'overview' (default), 'section', or 'full'
+- section (optional): Section to drill into (required when detail='section')
+- limit (optional): Max items to return for lists (default: 10)
+- offset (optional): Pagination offset for lists (default: 0)
+- filter (optional): Filter expression like 'name:chrome', 'publisher:Microsoft', 'high_memory', 'high_cpu'
+- sort_by (optional): Sort field - 'name', 'memory', 'cpu', 'size', 'install_date', 'pid'
+- pid (optional): Get full details for specific process by PID
+- app_name (optional): Get full details for specific application by name
+
+Available sections:
+- system_information, hardware_information, display_information
+- user_and_security_information, performance_information, software_environment
+- network_information, installed_applications, running_processes, browser_information
+
+Returns:
+- Overview mode: Tree of available sections with counts and top items preview
+- Section mode: Summary stats + top N items (paginated)
+- Full mode: Complete data for all sections (WARNING: very large!)
+
 ### write_file, read_file
 Write/read data on a file on the local filesystem. Supports unlimited file sizes. Useful with the `python` mcp tool, which can directly use MCP servers and process unlimited-size data.
 
@@ -2012,6 +2090,83 @@ All parameters are passed in a single 'input' dict:
      "input": {
        "operation": "read_file",
        "path": "mydata.txt",
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+20. For getting system overview (recommended first call - tiny response):
+   {
+     "input": {
+       "operation": "about",
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+21. For drilling into a specific section (e.g., running processes):
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "running_processes",
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+22. For filtering processes by name:
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "running_processes",
+       "filter": "name:chrome",
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+23. For getting high-memory processes sorted by memory usage:
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "running_processes",
+       "filter": "high_memory",
+       "sort_by": "memory",
+       "limit": 20,
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+24. For getting details of a specific process by PID:
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "running_processes",
+       "pid": 12345,
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+25. For paginating through installed applications:
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "installed_applications",
+       "limit": 20,
+       "offset": 40,
+       "sort_by": "name",
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+
+26. For filtering applications by publisher:
+   {
+     "input": {
+       "operation": "about",
+       "detail": "section",
+       "section": "installed_applications",
+       "filter": "publisher:Microsoft",
        "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
      }
    }
@@ -3371,9 +3526,35 @@ def create_error_response(error_msg: str, with_readme: bool = True) -> Dict:
     return {"content": [{"type": "text", "text": f"{error_msg}{readme(with_readme)}"}], "isError": True}
 
 def create_success_response(success_msg: str, **extra_fields) -> Dict:
-    """Create a success response in the correct MCP format."""
-    response = {"content": [{"type": "text", "text": success_msg}],"isError": False}
-    response.update(extra_fields) # Add any extra fields (like session_id, base64_image, etc.)
+    """Create a success response in the correct MCP format.
+    
+    IMPORTANT: Cursor only passes content[0].text to the AI, not extra fields.
+    So we serialize any structured data (overview, processes, etc.) into the text
+    field as JSON so the AI can actually see and use it.
+    """
+    # Check if there's structured data that needs to be visible to the AI
+    # These are the fields that contain the actual useful data from about operation
+    structured_data_fields = ['overview', 'processes', 'applications', 'section_data', 
+                              'network_data', 'system_info', 'process_detail', 
+                              'matching_applications', 'summary_stats', 'pagination']
+    
+    has_structured_data = any(field in extra_fields for field in structured_data_fields)
+    
+    if has_structured_data:
+        # Build a combined response: brief header + JSON data
+        # The AI needs to see this data to be useful
+        data_to_serialize = {k: v for k, v in extra_fields.items() 
+                            if k not in ['isError']}  # Keep all metadata + data
+        try:
+            json_data = json.dumps(data_to_serialize, indent=2, default=str)
+            text_content = f"{success_msg}\n\n{json_data}"
+        except Exception:
+            text_content = success_msg
+    else:
+        text_content = success_msg
+    
+    response = {"content": [{"type": "text", "text": text_content}], "isError": False}
+    response.update(extra_fields)  # Still include extra fields for programmatic access
     return response
 
 def handle_list_windows(params: Dict) -> Dict:
@@ -3923,18 +4104,94 @@ def get_hardware_information_summary_and_full() -> Dict[str, any]:
         return {"error": f"Failed to get hardware information: {e}"}
 
 def get_display_information_summary_and_full() -> Dict[str, any]:
-    """Get detailed display information including taskbar and usable space"""
+    """Get comprehensive display/monitor information including layout, DPI, refresh rate, and physical properties.
+    
+    This function provides detailed information about all attached monitors that an AI can use to:
+    - Understand the multi-monitor layout and arrangement
+    - Calculate correct screen coordinates for automation
+    - Account for DPI scaling when positioning windows
+    - Understand which monitor is primary and their relative positions
+    
+    Returns:
+        Dict containing:
+        - displays: List of monitor details (resolution, position, DPI, refresh rate, etc.)
+        - primary_display_index: Index of the primary monitor
+        - total_display_count: Number of monitors
+        - virtual_screen: Combined bounding box of all monitors
+        - layout_description: Human-readable description of monitor arrangement
+    """
     
     try:
         display_info = {
             "displays": [],
             "primary_display_index": -1,
-            "total_display_count": 0
+            "total_display_count": 0,
+            "virtual_screen": {
+                "left": 0,
+                "top": 0,
+                "right": 0,
+                "bottom": 0,
+                "total_width": 0,
+                "total_height": 0
+            },
+            "layout_description": ""
         }
+        
+        # Get virtual screen dimensions (bounding box of all monitors)
+        try:
+            virtual_left = win32api.GetSystemMetrics(win32con.SM_XVIRTUALSCREEN)
+            virtual_top = win32api.GetSystemMetrics(win32con.SM_YVIRTUALSCREEN)
+            virtual_width = win32api.GetSystemMetrics(win32con.SM_CXVIRTUALSCREEN)
+            virtual_height = win32api.GetSystemMetrics(win32con.SM_CYVIRTUALSCREEN)
+            display_info["virtual_screen"] = {
+                "left": virtual_left,
+                "top": virtual_top,
+                "right": virtual_left + virtual_width,
+                "bottom": virtual_top + virtual_height,
+                "total_width": virtual_width,
+                "total_height": virtual_height
+            }
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error getting virtual screen metrics: {e}")
         
         # According to pywin32 docs, EnumDisplayMonitors returns a list of tuples:
         # (hMonitor, hdcMonitor, PyRECT) for each monitor found
         monitors = win32api.EnumDisplayMonitors(None, None)
+        
+        # Build a mapping of device names to display settings
+        device_settings_map = {}
+        try:
+            device_index = 0
+            while True:
+                try:
+                    device = win32api.EnumDisplayDevices(None, device_index, 0)
+                    if not device.DeviceName:
+                        break
+                    
+                    # Get display settings for this device
+                    try:
+                        settings = win32api.EnumDisplaySettings(device.DeviceName, win32con.ENUM_CURRENT_SETTINGS)
+                        device_settings_map[device.DeviceName] = {
+                            "device_name": device.DeviceName,
+                            "device_string": device.DeviceString,
+                            "device_id": device.DeviceID,
+                            "bits_per_pixel": settings.BitsPerPel,
+                            "refresh_rate_hz": settings.DisplayFrequency,
+                            "pixel_width": settings.PelsWidth,
+                            "pixel_height": settings.PelsHeight,
+                            "display_orientation_degrees": settings.DisplayOrientation * 90,  # 0=0°, 1=90°, 2=180°, 3=270°
+                            "display_flags": settings.DisplayFlags,
+                            "position_x": settings.Position_x,
+                            "position_y": settings.Position_y
+                        }
+                    except Exception as e:
+                        MCPLogger.log(TOOL_LOG_NAME, f"Error getting settings for {device.DeviceName}: {e}")
+                    
+                    device_index += 1
+                except Exception:
+                    break
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error enumerating display devices: {e}")
         
         for i, (hMonitor, hdcMonitor, rect) in enumerate(monitors):
             try:
@@ -3944,6 +4201,7 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                 # Convert PyRECT objects to standard tuples
                 monitor_rect = tuple(monitor_info['Monitor'])
                 work_rect = tuple(monitor_info['Work'])
+                device_name = monitor_info.get('Device', '')
 
                 # Validate rect format
                 if len(monitor_rect) != 4 or len(work_rect) != 4:
@@ -3951,7 +4209,9 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                     continue
 
                 display_data = {
+                    "monitor_index": i,
                     "monitor_handle": int(hMonitor),
+                    "device_name": device_name,
                     "is_primary": (monitor_info['Flags'] & win32con.MONITORINFOF_PRIMARY) != 0,
                     "full_resolution": {
                         "left": monitor_rect[0],
@@ -3970,6 +4230,57 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                         "height": work_rect[3] - work_rect[1]
                     }
                 }
+                
+                # Add device-specific information if available
+                if device_name in device_settings_map:
+                    dev_info = device_settings_map[device_name]
+                    display_data["device_description"] = dev_info.get("device_string", "")
+                    display_data["device_id"] = dev_info.get("device_id", "")
+                    display_data["color_depth_bits_per_pixel"] = dev_info.get("bits_per_pixel", 0)
+                    display_data["refresh_rate_hz"] = dev_info.get("refresh_rate_hz", 0)
+                    display_data["orientation_degrees"] = dev_info.get("display_orientation_degrees", 0)
+                    
+                    # Determine orientation name
+                    orientation_deg = dev_info.get("display_orientation_degrees", 0)
+                    if orientation_deg == 0:
+                        display_data["orientation_name"] = "landscape"
+                    elif orientation_deg == 90:
+                        display_data["orientation_name"] = "portrait_rotated_right"
+                    elif orientation_deg == 180:
+                        display_data["orientation_name"] = "landscape_flipped"
+                    elif orientation_deg == 270:
+                        display_data["orientation_name"] = "portrait_rotated_left"
+                    else:
+                        display_data["orientation_name"] = "unknown"
+                
+                # Get DPI information for this monitor
+                try:
+                    # Use GetDpiForMonitor if available (Windows 8.1+)
+                    shcore = ctypes.windll.shcore
+                    dpi_x = ctypes.c_uint()
+                    dpi_y = ctypes.c_uint()
+                    # MDT_EFFECTIVE_DPI = 0 (effective DPI after system scaling)
+                    # MDT_ANGULAR_DPI = 1 (DPI based on angular size)
+                    # MDT_RAW_DPI = 2 (raw DPI from EDID)
+                    result = shcore.GetDpiForMonitor(hMonitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                    if result == 0:  # S_OK
+                        display_data["dpi_x"] = dpi_x.value
+                        display_data["dpi_y"] = dpi_y.value
+                        display_data["scale_factor_percent"] = int((dpi_x.value / 96.0) * 100)
+                        display_data["scale_factor_multiplier"] = round(dpi_x.value / 96.0, 2)
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"GetDpiForMonitor not available: {e}")
+                    # Fallback: get system DPI
+                    try:
+                        hdc = win32gui.GetDC(0)
+                        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+                        win32gui.ReleaseDC(0, hdc)
+                        display_data["dpi_x"] = dpi
+                        display_data["dpi_y"] = dpi
+                        display_data["scale_factor_percent"] = int((dpi / 96.0) * 100)
+                        display_data["scale_factor_multiplier"] = round(dpi / 96.0, 2)
+                    except Exception:
+                        pass
                 
                 # Calculate taskbar area by comparing full vs work area
                 taskbar_info = {"visible": False}
@@ -4000,6 +4311,21 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                 continue
         
         display_info["total_display_count"] = len(display_info["displays"])
+        
+        # Generate human-readable layout description
+        if display_info["displays"]:
+            layout_parts = []
+            sorted_displays = sorted(display_info["displays"], key=lambda d: (d["full_resolution"]["left"], d["full_resolution"]["top"]))
+            for d in sorted_displays:
+                primary_marker = " (PRIMARY)" if d["is_primary"] else ""
+                scale_info = f" @ {d.get('scale_factor_percent', 100)}%" if d.get('scale_factor_percent', 100) != 100 else ""
+                refresh_info = f" {d.get('refresh_rate_hz', 60)}Hz" if d.get('refresh_rate_hz') else ""
+                layout_parts.append(
+                    f"Monitor {d['monitor_index']}{primary_marker}: "
+                    f"{d['full_resolution']['width']}x{d['full_resolution']['height']}{scale_info}{refresh_info} "
+                    f"at position ({d['full_resolution']['left']}, {d['full_resolution']['top']})"
+                )
+            display_info["layout_description"] = "; ".join(layout_parts)
         
         return display_info
 
@@ -4439,15 +4765,26 @@ def get_running_processes_summary_and_full() -> Dict[str, any]:
         return {"error": f"Failed to get running processes: {e}"}
 
 def handle_about(params: Dict) -> Dict:
-    """Handle about operation to get comprehensive system information"""
+    """Handle about operation with drill-down navigation to avoid context overflow.
+    
+    Three levels of detail:
+    - overview (default): Returns ~2KB navigable tree with counts
+    - section: Returns summary + top N items for one section (paginated)
+    - full: Returns everything (WARNING: 500KB+, can overflow context)
+    """
     try:
-        detail = params.get("detail", "summary")
-        section = params.get("section", None)  # If specified, return only this section
+        detail = params.get("detail", "overview")
+        section = params.get("section", None)
+        limit = params.get("limit", 10)
+        offset = params.get("offset", 0)
+        filter_expr = params.get("filter", None)
+        sort_by = params.get("sort_by", None)
+        pid = params.get("pid", None)
+        app_name = params.get("app_name", None)
         
-        if detail not in ["summary", "full"]:
-            return create_error_response("Parameter 'detail' must be 'summary' or 'full'", with_readme=False)
+        if detail not in ["overview", "section", "full"]:
+            return create_error_response("Parameter 'detail' must be 'overview', 'section', or 'full'", with_readme=False)
         
-        # Define all available sections
         available_sections = [
             "system_information",
             "hardware_information", 
@@ -4464,60 +4801,395 @@ def handle_about(params: Dict) -> Dict:
         if section and section not in available_sections:
             return create_error_response(f"Invalid section '{section}'. Available sections: {', '.join(available_sections)}", with_readme=False)
         
-        # Gather information
-        system_info = {}
+        # Validate detail/section combination
+        if detail == "section" and not section:
+            return create_error_response("Parameter 'section' is required when detail='section'", with_readme=False)
         
-        sections_to_include = [section] if section else available_sections
+        # ========== OVERVIEW MODE (default) - tiny response ==========
+        if detail == "overview":
+            return handle_about_overview_mode()
         
-        for section_name in sections_to_include:
-            if section_name == "system_information":
-                system_info["system_information"] = get_system_information_summary_and_full()
-            elif section_name == "hardware_information":
-                system_info["hardware_information"] = get_hardware_information_summary_and_full()
-            elif section_name == "display_information":
-                system_info["display_information"] = get_display_information_summary_and_full()
-            elif section_name == "user_and_security_information":
-                system_info["user_and_security_information"] = get_user_and_security_information_summary_and_full()
-            elif section_name == "performance_information":
-                system_info["performance_information"] = get_performance_information_summary_and_full()
-            elif section_name == "software_environment":
-                system_info["software_environment"] = get_software_environment_summary_and_full()
-            elif section_name == "network_information":
-                system_info["network_information"] = get_network_information_summary_and_full()
-            elif section_name == "installed_applications":
-                system_info["installed_applications"] = get_installed_applications_summary_and_full()
-            elif section_name == "running_processes":
-                system_info["running_processes"] = get_running_processes_summary_and_full()
-            elif section_name == "browser_information":
-                system_info["browser_information"] = get_browser_information_summary_and_full()
+        # ========== SECTION MODE - drill into one section with pagination ==========
+        if detail == "section":
+            return handle_about_section_mode(section, limit, offset, filter_expr, sort_by, pid, app_name)
         
-        # For full detail, include list_windows output
-        if detail == "full" and (not section or section == "current_state"):
-            try:
-                windows_result = handle_list_windows({"include_all": True})
-                if windows_result.get("success"):
-                    system_info["current_state"] = {
-                        "windows": windows_result.get("windows", []),
-                        "window_count": len(windows_result.get("windows", []))
-                    }
-            except Exception as e:
-                system_info["current_state"] = {"error": f"Failed to get window information: {e}"}
-        
-        # Format response as JSON text
-        #response_text = f"System Information ({detail} detail)\n\n"
-        #if section:
-        #    response_text += f"Section: {section}\n\n"
-        #response_text += json.dumps(system_info, indent=2)
-        
-        return create_success_response(
-            "System Info", #response_text,
-            detail_level=detail,
-            requested_section=section,
-            system_info=system_info
-        )
+        # ========== FULL MODE (legacy) - WARNING: huge response ==========
+        if detail == "full":
+            return handle_about_full_mode_with_warning(section)
         
     except Exception as e:
         return create_error_response(f"Error handling about operation: {e}", with_readme=False)
+
+
+def handle_about_overview_mode() -> Dict:
+    """Return a small overview of the system with counts and navigation hints."""
+    try:
+        # Get quick summary data (small sections only)
+        sys_info = get_system_information_summary_and_full()
+        hw_info = get_hardware_information_summary_and_full()
+        perf_info = get_performance_information_summary_and_full()
+        
+        # Get counts for large sections without loading full data
+        proc_info = get_running_processes_summary_and_full()
+        apps_info = get_installed_applications_summary_and_full()
+        browser_info = get_browser_information_summary_and_full()
+        network_info = get_network_information_summary_and_full()
+        
+        overview = {
+            "system_overview": {
+                "computer_name": sys_info.get("computer_name", "Unknown"),
+                "windows_version": sys_info.get("windows_version", "Unknown"),
+                "uptime_hours": sys_info.get("system_uptime_hours", 0),
+                "cpu_model": hw_info.get("cpu_model", "Unknown")[:50],
+                "cpu_cores": hw_info.get("cpu_cores_logical", 0),
+                "memory_total_gb": hw_info.get("total_memory_gb", 0),
+                "memory_used_percent": perf_info.get("memory_usage_percent", 0),
+                "cpu_usage_percent": perf_info.get("cpu_usage_percent", 0)
+            },
+            "available_sections": {
+                "system_information": {"size": "small", "description": "OS version, uptime, platform details"},
+                "hardware_information": {"size": "small", "description": "CPU, memory, storage devices"},
+                "display_information": {"size": "small", "description": "Monitors, resolution, DPI"},
+                "user_and_security_information": {"size": "small", "description": "Username, domain, admin status"},
+                "performance_information": {"size": "small", "description": "Current CPU, memory, disk usage"},
+                "software_environment": {"size": "small", "description": "Python, Git, Docker, WSL status"},
+                "network_information": {
+                    "size": "medium",
+                    "interfaces_count": len(network_info.get("interfaces", [])),
+                    "connectivity": network_info.get("connectivity_status", "unknown")
+                },
+                "installed_applications": {
+                    "size": "large",
+                    "total_apps": apps_info.get("summary_stats", {}).get("total_applications", 0),
+                    "registry_apps": apps_info.get("total_registry_count", 0),
+                    "store_apps": apps_info.get("total_store_count", 0),
+                    "top_publishers": [p[0] for p in apps_info.get("summary_stats", {}).get("top_publishers", [])[:3]]
+                },
+                "running_processes": {
+                    "size": "large",
+                    "total_processes": proc_info.get("summary_stats", {}).get("total_processes", 0),
+                    "high_memory_count": proc_info.get("summary_stats", {}).get("high_memory_count", 0),
+                    "high_cpu_count": proc_info.get("summary_stats", {}).get("high_cpu_count", 0),
+                    "total_memory_mb": proc_info.get("summary_stats", {}).get("total_memory_usage_mb", 0),
+                    "top_memory_processes": [p["name"] for p in proc_info.get("high_memory_processes", [])[:3]]
+                },
+                "browser_information": {
+                    "size": "small",
+                    "browsers_found": browser_info.get("usage_stats", {}).get("total_browsers_found", 0),
+                    "default_browser": browser_info.get("default_browser", "Unknown")
+                }
+            },
+            "usage_hint": "Use detail='section' with section='<name>' to drill into a section. Use limit, offset, filter, sort_by for large sections."
+        }
+        
+        return create_success_response(
+            "System Overview",
+            detail_level="overview",
+            overview=overview
+        )
+        
+    except Exception as e:
+        return create_error_response(f"Error getting system overview: {e}", with_readme=False)
+
+
+def handle_about_section_mode(section: str, limit: int, offset: int, filter_expr: Optional[str], sort_by: Optional[str], pid: Optional[int], app_name: Optional[str]) -> Dict:
+    """Return detailed data for one section with filtering and pagination."""
+    try:
+        # Small sections - return full data (they're already small)
+        small_sections = ["system_information", "hardware_information", "display_information", 
+                         "user_and_security_information", "performance_information", "software_environment", "browser_information"]
+        
+        if section in small_sections:
+            return handle_about_small_section(section)
+        
+        # Network - medium size, return full
+        if section == "network_information":
+            return handle_about_network_section()
+        
+        # Large sections - apply filtering and pagination
+        if section == "running_processes":
+            return handle_about_processes_section(limit, offset, filter_expr, sort_by, pid)
+        
+        if section == "installed_applications":
+            return handle_about_applications_section(limit, offset, filter_expr, sort_by, app_name)
+        
+        return create_error_response(f"Unknown section: {section}", with_readme=False)
+        
+    except Exception as e:
+        return create_error_response(f"Error getting section '{section}': {e}", with_readme=False)
+
+
+def handle_about_small_section(section: str) -> Dict:
+    """Return full data for a small section."""
+    section_data = None
+    
+    if section == "system_information":
+        section_data = get_system_information_summary_and_full()
+    elif section == "hardware_information":
+        section_data = get_hardware_information_summary_and_full()
+    elif section == "display_information":
+        section_data = get_display_information_summary_and_full()
+    elif section == "user_and_security_information":
+        section_data = get_user_and_security_information_summary_and_full()
+    elif section == "performance_information":
+        section_data = get_performance_information_summary_and_full()
+    elif section == "software_environment":
+        section_data = get_software_environment_summary_and_full()
+    elif section == "browser_information":
+        section_data = get_browser_information_summary_and_full()
+    
+    return create_success_response(
+        f"Section: {section}",
+        detail_level="section",
+        section=section,
+        data=section_data
+    )
+
+
+def handle_about_network_section() -> Dict:
+    """Return network information."""
+    network_data = get_network_information_summary_and_full()
+    return create_success_response(
+        "Section: network_information",
+        detail_level="section",
+        section="network_information",
+        data=network_data
+    )
+
+
+def handle_about_processes_section(limit: int, offset: int, filter_expr: Optional[str], sort_by: Optional[str], pid: Optional[int]) -> Dict:
+    """Return running processes with filtering, sorting, and pagination."""
+    full_data = get_running_processes_summary_and_full()
+    
+    # If looking for specific PID
+    if pid is not None:
+        for proc in full_data.get("running_processes", []):
+            if proc.get("pid") == pid:
+                return create_success_response(
+                    f"Process details for PID {pid}",
+                    detail_level="section",
+                    section="running_processes",
+                    pid_requested=pid,
+                    process=proc
+                )
+        return create_error_response(f"Process with PID {pid} not found", with_readme=False)
+    
+    # Get the list to filter
+    processes = full_data.get("running_processes", [])
+    
+    # Apply filter
+    if filter_expr:
+        processes = apply_process_filter(processes, filter_expr, full_data)
+    
+    # Apply sort
+    if sort_by:
+        processes = apply_process_sort(processes, sort_by)
+    
+    # Calculate pagination
+    total_count = len(processes)
+    paginated_processes = processes[offset:offset + limit]
+    
+    return create_success_response(
+        f"Running Processes ({offset + 1}-{offset + len(paginated_processes)} of {total_count})",
+        detail_level="section",
+        section="running_processes",
+        summary_stats=full_data.get("summary_stats", {}),
+        filter_applied=filter_expr,
+        sort_by=sort_by,
+        pagination={
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "showing": f"{offset + 1}-{offset + len(paginated_processes)} of {total_count}",
+            "has_more": offset + limit < total_count
+        },
+        processes=paginated_processes,
+        usage_hint="Use offset to paginate. Use filter='high_memory', 'high_cpu', or 'name:pattern' to narrow results."
+    )
+
+
+def apply_process_filter(processes: List[Dict], filter_expr: str, full_data: Dict) -> List[Dict]:
+    """Apply filter expression to process list."""
+    filter_lower = filter_expr.lower()
+    
+    # Special filters
+    if filter_lower == "high_memory":
+        return full_data.get("high_memory_processes", [])
+    elif filter_lower == "high_cpu":
+        return full_data.get("high_cpu_processes", [])
+    elif filter_lower == "system":
+        return full_data.get("system_processes", [])
+    elif filter_lower == "user":
+        return full_data.get("user_processes", [])
+    
+    # Field:value filters
+    if ":" in filter_expr:
+        field, pattern = filter_expr.split(":", 1)
+        field = field.lower().strip()
+        pattern = pattern.lower().strip()
+        
+        if field == "name":
+            return [p for p in processes if pattern in p.get("name", "").lower()]
+        elif field == "exe":
+            return [p for p in processes if pattern in p.get("exe_path", "").lower()]
+        elif field == "user" or field == "username":
+            return [p for p in processes if pattern in p.get("username", "").lower()]
+    
+    # Default: search in name
+    return [p for p in processes if filter_expr.lower() in p.get("name", "").lower()]
+
+
+def apply_process_sort(processes: List[Dict], sort_by: str) -> List[Dict]:
+    """Sort process list by field."""
+    sort_key_map = {
+        "name": lambda p: p.get("name", "").lower(),
+        "memory": lambda p: p.get("memory_mb", 0),
+        "cpu": lambda p: p.get("cpu_percent", 0),
+        "pid": lambda p: p.get("pid", 0)
+    }
+    
+    if sort_by in sort_key_map:
+        reverse = sort_by in ["memory", "cpu"]  # Descending for resource usage
+        return sorted(processes, key=sort_key_map[sort_by], reverse=reverse)
+    
+    return processes
+
+
+def handle_about_applications_section(limit: int, offset: int, filter_expr: Optional[str], sort_by: Optional[str], app_name: Optional[str]) -> Dict:
+    """Return installed applications with filtering, sorting, and pagination."""
+    full_data = get_installed_applications_summary_and_full()
+    
+    # Combine registry and store apps
+    all_apps = full_data.get("registry_applications", []) + full_data.get("windows_store_apps", [])
+    
+    # If looking for specific app by name
+    if app_name:
+        matching_apps = [app for app in all_apps if app_name.lower() in app.get("name", "").lower()]
+        if matching_apps:
+            return create_success_response(
+                f"Application details for '{app_name}'",
+                detail_level="section",
+                section="installed_applications",
+                app_name_requested=app_name,
+                matching_count=len(matching_apps),
+                applications=matching_apps
+            )
+        return create_error_response(f"No application matching '{app_name}' found", with_readme=False)
+    
+    # Apply filter
+    if filter_expr:
+        all_apps = apply_application_filter(all_apps, filter_expr)
+    
+    # Apply sort
+    if sort_by:
+        all_apps = apply_application_sort(all_apps, sort_by)
+    
+    # Calculate pagination
+    total_count = len(all_apps)
+    paginated_apps = all_apps[offset:offset + limit]
+    
+    return create_success_response(
+        f"Installed Applications ({offset + 1}-{offset + len(paginated_apps)} of {total_count})",
+        detail_level="section",
+        section="installed_applications",
+        summary_stats=full_data.get("summary_stats", {}),
+        filter_applied=filter_expr,
+        sort_by=sort_by,
+        pagination={
+            "total_count": total_count,
+            "offset": offset,
+            "limit": limit,
+            "showing": f"{offset + 1}-{offset + len(paginated_apps)} of {total_count}",
+            "has_more": offset + limit < total_count
+        },
+        applications=paginated_apps,
+        usage_hint="Use offset to paginate. Use filter='publisher:Microsoft' or 'name:pattern' to narrow results."
+    )
+
+
+def apply_application_filter(apps: List[Dict], filter_expr: str) -> List[Dict]:
+    """Apply filter expression to application list."""
+    # Field:value filters
+    if ":" in filter_expr:
+        field, pattern = filter_expr.split(":", 1)
+        field = field.lower().strip()
+        pattern = pattern.lower().strip()
+        
+        if field == "name":
+            return [a for a in apps if pattern in a.get("name", "").lower()]
+        elif field == "publisher":
+            return [a for a in apps if pattern in a.get("publisher", "").lower()]
+        elif field == "version":
+            return [a for a in apps if pattern in a.get("version", "").lower()]
+        elif field == "source":
+            return [a for a in apps if pattern in a.get("source", a.get("registry_source", "")).lower()]
+    
+    # Default: search in name
+    return [a for a in apps if filter_expr.lower() in a.get("name", "").lower()]
+
+
+def apply_application_sort(apps: List[Dict], sort_by: str) -> List[Dict]:
+    """Sort application list by field."""
+    sort_key_map = {
+        "name": lambda a: a.get("name", "").lower(),
+        "size": lambda a: a.get("estimated_size_mb", 0) or 0,
+        "install_date": lambda a: a.get("install_date", "") or "",
+        "publisher": lambda a: a.get("publisher", "").lower()
+    }
+    
+    if sort_by in sort_key_map:
+        reverse = sort_by == "size"  # Descending for size
+        return sorted(apps, key=sort_key_map[sort_by], reverse=reverse)
+    
+    return apps
+
+
+def handle_about_full_mode_with_warning(section: Optional[str]) -> Dict:
+    """Return full data for all sections (legacy mode). Includes warning about size."""
+    available_sections = [
+        "system_information",
+        "hardware_information", 
+        "display_information",
+        "user_and_security_information",
+        "performance_information",
+        "software_environment",
+        "network_information",
+        "installed_applications",
+        "running_processes",
+        "browser_information"
+    ]
+    
+    system_info = {}
+    sections_to_include = [section] if section else available_sections
+    
+    for section_name in sections_to_include:
+        if section_name == "system_information":
+            system_info["system_information"] = get_system_information_summary_and_full()
+        elif section_name == "hardware_information":
+            system_info["hardware_information"] = get_hardware_information_summary_and_full()
+        elif section_name == "display_information":
+            system_info["display_information"] = get_display_information_summary_and_full()
+        elif section_name == "user_and_security_information":
+            system_info["user_and_security_information"] = get_user_and_security_information_summary_and_full()
+        elif section_name == "performance_information":
+            system_info["performance_information"] = get_performance_information_summary_and_full()
+        elif section_name == "software_environment":
+            system_info["software_environment"] = get_software_environment_summary_and_full()
+        elif section_name == "network_information":
+            system_info["network_information"] = get_network_information_summary_and_full()
+        elif section_name == "installed_applications":
+            system_info["installed_applications"] = get_installed_applications_summary_and_full()
+        elif section_name == "running_processes":
+            system_info["running_processes"] = get_running_processes_summary_and_full()
+        elif section_name == "browser_information":
+            system_info["browser_information"] = get_browser_information_summary_and_full()
+    
+    return create_success_response(
+        "WARNING: Full system info - response may be 500KB+. Use detail='overview' for navigation.",
+        detail_level="full",
+        requested_section=section,
+        system_info=system_info
+    )
 
 
 def get_browser_information_summary_and_full() -> Dict[str, any]:
@@ -5046,6 +5718,259 @@ if IS_MACOS:
         MCPLogger.log(TOOL_LOG_NAME, f"Error in take_screenshot_functional: {e}")
         return False, f"Screenshot error: {e}", None
 
+    def get_display_information_summary_and_full() -> Dict[str, any]:
+      """macOS implementation: Get comprehensive display/monitor information.
+      
+      Uses system_profiler to get detailed display information including resolution,
+      refresh rate, color depth, and multi-monitor layout.
+      
+      Returns:
+          Dict containing display information similar to Windows implementation
+      """
+      try:
+        display_info = {
+          "displays": [],
+          "primary_display_index": 0,  # macOS primary is typically index 0
+          "total_display_count": 0,
+          "virtual_screen": {
+            "left": 0,
+            "top": 0,
+            "right": 0,
+            "bottom": 0,
+            "total_width": 0,
+            "total_height": 0
+          },
+          "layout_description": ""
+        }
+        
+        # Method 1: Use system_profiler for detailed display info (JSON output)
+        try:
+          MCPLogger.log(TOOL_LOG_NAME, "Getting macOS display info via system_profiler")
+          result = subprocess.run(
+            ['system_profiler', 'SPDisplaysDataType', '-json'],
+            capture_output=True,
+            text=True,
+            timeout=10
+          )
+          
+          if result.returncode == 0:
+            import json
+            profiler_data = json.loads(result.stdout)
+            
+            displays_data = profiler_data.get('SPDisplaysDataType', [])
+            monitor_index = 0
+            min_x, min_y, max_x, max_y = 0, 0, 0, 0
+            
+            for gpu in displays_data:
+              # Each GPU can have multiple displays attached
+              ndrvs = gpu.get('spdisplays_ndrvs', [])
+              
+              for display in ndrvs:
+                display_data = {
+                  "monitor_index": monitor_index,
+                  "monitor_handle": f"macos_display_{monitor_index}",
+                  "device_name": display.get('_name', f'Display {monitor_index}'),
+                  "device_description": display.get('_name', ''),
+                  "is_primary": display.get('spdisplays_main', 'spdisplays_not_main') == 'spdisplays_main',
+                  "full_resolution": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 0,
+                    "width": 0,
+                    "height": 0
+                  },
+                  "work_area": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 0,
+                    "width": 0,
+                    "height": 0
+                  }
+                }
+                
+                # Parse resolution (format: "1920 x 1080" or "3840 x 2160 @ 60Hz")
+                resolution_str = display.get('_spdisplays_resolution', display.get('spdisplays_resolution', ''))
+                if resolution_str:
+                  # Handle formats like "1920 x 1080" or "3840 x 2160 @ 60Hz (3840 x 2160)"
+                  import re
+                  res_match = re.search(r'(\d+)\s*x\s*(\d+)', resolution_str)
+                  if res_match:
+                    width = int(res_match.group(1))
+                    height = int(res_match.group(2))
+                    display_data["full_resolution"]["width"] = width
+                    display_data["full_resolution"]["height"] = height
+                    display_data["full_resolution"]["right"] = width
+                    display_data["full_resolution"]["bottom"] = height
+                    display_data["work_area"]["width"] = width
+                    display_data["work_area"]["height"] = height - 25  # Approximate menu bar
+                    display_data["work_area"]["top"] = 25
+                    display_data["work_area"]["right"] = width
+                    display_data["work_area"]["bottom"] = height
+                    
+                    # Update virtual screen bounds
+                    max_x = max(max_x, width)
+                    max_y = max(max_y, height)
+                  
+                  # Extract refresh rate if present
+                  hz_match = re.search(r'@\s*(\d+)\s*Hz', resolution_str)
+                  if hz_match:
+                    display_data["refresh_rate_hz"] = int(hz_match.group(1))
+                
+                # Get color depth
+                depth_str = display.get('spdisplays_depth', '')
+                if '32' in depth_str or 'Billions' in depth_str:
+                  display_data["color_depth_bits_per_pixel"] = 32
+                elif '16' in depth_str or 'Thousands' in depth_str:
+                  display_data["color_depth_bits_per_pixel"] = 16
+                elif '8' in depth_str or '256' in depth_str:
+                  display_data["color_depth_bits_per_pixel"] = 8
+                
+                # Get pixel info for Retina displays
+                pixels_str = display.get('spdisplays_pixels', '')
+                if pixels_str:
+                  res_match = re.search(r'(\d+)\s*x\s*(\d+)', pixels_str)
+                  if res_match:
+                    display_data["native_pixel_width"] = int(res_match.group(1))
+                    display_data["native_pixel_height"] = int(res_match.group(2))
+                    # Calculate Retina scale factor
+                    if display_data["full_resolution"]["width"] > 0:
+                      scale = display_data["native_pixel_width"] / display_data["full_resolution"]["width"]
+                      display_data["scale_factor_multiplier"] = round(scale, 2)
+                      display_data["scale_factor_percent"] = int(scale * 100)
+                      display_data["is_retina"] = scale > 1.0
+                
+                # Connection type
+                display_data["connection_type"] = display.get('spdisplays_connection_type', 'Unknown')
+                
+                # Display type (built-in vs external)
+                display_data["is_builtin"] = display.get('spdisplays_display_type', '') == 'spdisplays_built-in'
+                
+                # Mirror state
+                display_data["is_mirrored"] = display.get('spdisplays_mirror', 'spdisplays_off') == 'spdisplays_on'
+                
+                # Ambient light compensation
+                display_data["auto_brightness_enabled"] = display.get('spdisplays_ambient_brightness', 'spdisplays_off') == 'spdisplays_on'
+                
+                # Orientation (default is landscape)
+                rotation = display.get('spdisplays_rotation', '')
+                if 'supported' in rotation.lower() or not rotation:
+                  display_data["orientation_degrees"] = 0
+                  display_data["orientation_name"] = "landscape"
+                else:
+                  try:
+                    display_data["orientation_degrees"] = int(rotation)
+                    if display_data["orientation_degrees"] == 0:
+                      display_data["orientation_name"] = "landscape"
+                    elif display_data["orientation_degrees"] == 90:
+                      display_data["orientation_name"] = "portrait_rotated_right"
+                    elif display_data["orientation_degrees"] == 180:
+                      display_data["orientation_name"] = "landscape_flipped"
+                    elif display_data["orientation_degrees"] == 270:
+                      display_data["orientation_name"] = "portrait_rotated_left"
+                  except ValueError:
+                    display_data["orientation_degrees"] = 0
+                    display_data["orientation_name"] = "landscape"
+                
+                # Menu bar (macOS equivalent of taskbar)
+                display_data["taskbar"] = {
+                  "visible": True,
+                  "position": "top",
+                  "size": 25  # Standard macOS menu bar height
+                }
+                
+                if display_data["is_primary"]:
+                  display_info["primary_display_index"] = monitor_index
+                
+                display_info["displays"].append(display_data)
+                monitor_index += 1
+                
+        except subprocess.TimeoutExpired:
+          MCPLogger.log(TOOL_LOG_NAME, "Timeout getting display info via system_profiler")
+        except json.JSONDecodeError as e:
+          MCPLogger.log(TOOL_LOG_NAME, f"Error parsing system_profiler JSON: {e}")
+        except Exception as e:
+          MCPLogger.log(TOOL_LOG_NAME, f"Error with system_profiler: {e}")
+        
+        # Method 2: Fallback using screeninfo if system_profiler didn't work
+        if not display_info["displays"]:
+          try:
+            # Try using screeninfo library if available
+            from screeninfo import get_monitors
+            
+            for idx, m in enumerate(get_monitors()):
+              display_data = {
+                "monitor_index": idx,
+                "monitor_handle": f"macos_display_{idx}",
+                "device_name": m.name or f"Display {idx}",
+                "is_primary": m.is_primary,
+                "full_resolution": {
+                  "left": m.x,
+                  "top": m.y,
+                  "right": m.x + m.width,
+                  "bottom": m.y + m.height,
+                  "width": m.width,
+                  "height": m.height
+                },
+                "work_area": {
+                  "left": m.x,
+                  "top": m.y + 25,  # Menu bar
+                  "right": m.x + m.width,
+                  "bottom": m.y + m.height,
+                  "width": m.width,
+                  "height": m.height - 25
+                },
+                "taskbar": {"visible": True, "position": "top", "size": 25}
+              }
+              
+              if m.is_primary:
+                display_info["primary_display_index"] = idx
+              
+              display_info["displays"].append(display_data)
+              
+          except ImportError:
+            MCPLogger.log(TOOL_LOG_NAME, "screeninfo not available for fallback")
+          except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error with screeninfo fallback: {e}")
+        
+        # Update totals and virtual screen
+        display_info["total_display_count"] = len(display_info["displays"])
+        
+        if display_info["displays"]:
+          min_x = min(d["full_resolution"]["left"] for d in display_info["displays"])
+          min_y = min(d["full_resolution"]["top"] for d in display_info["displays"])
+          max_x = max(d["full_resolution"]["right"] for d in display_info["displays"])
+          max_y = max(d["full_resolution"]["bottom"] for d in display_info["displays"])
+          
+          display_info["virtual_screen"] = {
+            "left": min_x,
+            "top": min_y,
+            "right": max_x,
+            "bottom": max_y,
+            "total_width": max_x - min_x,
+            "total_height": max_y - min_y
+          }
+          
+          # Generate layout description
+          layout_parts = []
+          for d in display_info["displays"]:
+            primary_marker = " (PRIMARY)" if d["is_primary"] else ""
+            retina_marker = " Retina" if d.get("is_retina") else ""
+            scale_info = f" @ {d.get('scale_factor_percent', 100)}%" if d.get('scale_factor_percent', 100) != 100 else ""
+            refresh_info = f" {d.get('refresh_rate_hz', 60)}Hz" if d.get('refresh_rate_hz') else ""
+            layout_parts.append(
+              f"{d['device_name']}{primary_marker}{retina_marker}: "
+              f"{d['full_resolution']['width']}x{d['full_resolution']['height']}{scale_info}{refresh_info}"
+            )
+          display_info["layout_description"] = "; ".join(layout_parts)
+        
+        return display_info
+        
+      except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"Error in get_display_information_summary_and_full: {e}")
+        return {"error": f"Failed to get display information: {e}"}
+
 
 ################################################################################################################################
 ################################################################################################################################
@@ -5456,6 +6381,272 @@ if IS_LINUX:
                 except:
                     pass
             return False, f"Screenshot error: {e}", None
+
+    def get_display_information_summary_and_full() -> Dict[str, any]:
+        """Linux implementation: Get comprehensive display/monitor information.
+        
+        Uses xrandr, PyWinCtl, or screeninfo to get detailed display information
+        including resolution, refresh rate, and multi-monitor layout.
+        
+        Returns:
+            Dict containing display information similar to Windows/macOS implementations
+        """
+        try:
+            display_info = {
+                "displays": [],
+                "primary_display_index": 0,
+                "total_display_count": 0,
+                "virtual_screen": {
+                    "left": 0,
+                    "top": 0,
+                    "right": 0,
+                    "bottom": 0,
+                    "total_width": 0,
+                    "total_height": 0
+                },
+                "layout_description": ""
+            }
+            
+            # Method 1: Use xrandr for detailed display info (most reliable on X11)
+            try:
+                MCPLogger.log(TOOL_LOG_NAME, "Getting Linux display info via xrandr")
+                result = subprocess.run(
+                    ['xrandr', '--query'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                
+                if result.returncode == 0:
+                    import re
+                    lines = result.stdout.strip().split('\n')
+                    
+                    monitor_index = 0
+                    current_display = None
+                    
+                    for line in lines:
+                        # Match connected displays: "DP-1 connected primary 1920x1080+0+0 ..."
+                        # or "HDMI-1 connected 2560x1440+1920+0 ..."
+                        connected_match = re.match(
+                            r'^(\S+)\s+connected\s*(primary)?\s*(\d+)x(\d+)\+(-?\d+)\+(-?\d+)\s*(.*)$',
+                            line
+                        )
+                        
+                        if connected_match:
+                            output_name = connected_match.group(1)
+                            is_primary = connected_match.group(2) == 'primary'
+                            width = int(connected_match.group(3))
+                            height = int(connected_match.group(4))
+                            pos_x = int(connected_match.group(5))
+                            pos_y = int(connected_match.group(6))
+                            extra_info = connected_match.group(7) or ''
+                            
+                            current_display = {
+                                "monitor_index": monitor_index,
+                                "monitor_handle": f"linux_display_{output_name}",
+                                "device_name": output_name,
+                                "device_description": output_name,
+                                "is_primary": is_primary,
+                                "full_resolution": {
+                                    "left": pos_x,
+                                    "top": pos_y,
+                                    "right": pos_x + width,
+                                    "bottom": pos_y + height,
+                                    "width": width,
+                                    "height": height
+                                },
+                                "work_area": {
+                                    "left": pos_x,
+                                    "top": pos_y,
+                                    "right": pos_x + width,
+                                    "bottom": pos_y + height,
+                                    "width": width,
+                                    "height": height
+                                },
+                                "orientation_degrees": 0,
+                                "orientation_name": "landscape"
+                            }
+                            
+                            # Parse rotation from extra info
+                            if 'left' in extra_info:
+                                current_display["orientation_degrees"] = 90
+                                current_display["orientation_name"] = "portrait_rotated_left"
+                            elif 'right' in extra_info:
+                                current_display["orientation_degrees"] = 270
+                                current_display["orientation_name"] = "portrait_rotated_right"
+                            elif 'inverted' in extra_info:
+                                current_display["orientation_degrees"] = 180
+                                current_display["orientation_name"] = "landscape_flipped"
+                            
+                            # Parse physical size if available (e.g., "527mm x 296mm")
+                            size_match = re.search(r'(\d+)mm\s*x\s*(\d+)mm', extra_info)
+                            if size_match:
+                                phys_width_mm = int(size_match.group(1))
+                                phys_height_mm = int(size_match.group(2))
+                                current_display["physical_width_mm"] = phys_width_mm
+                                current_display["physical_height_mm"] = phys_height_mm
+                                # Calculate DPI
+                                if phys_width_mm > 0 and phys_height_mm > 0:
+                                    dpi_x = round((width * 25.4) / phys_width_mm)
+                                    dpi_y = round((height * 25.4) / phys_height_mm)
+                                    current_display["dpi_x"] = dpi_x
+                                    current_display["dpi_y"] = dpi_y
+                                    current_display["scale_factor_percent"] = int((dpi_x / 96.0) * 100)
+                                    current_display["scale_factor_multiplier"] = round(dpi_x / 96.0, 2)
+                            
+                            # Taskbar placeholder (varies by DE)
+                            current_display["taskbar"] = {
+                                "visible": True,
+                                "position": "bottom",  # Most common default
+                                "size": 48  # Common panel height
+                            }
+                            
+                            if is_primary:
+                                display_info["primary_display_index"] = monitor_index
+                            
+                            display_info["displays"].append(current_display)
+                            monitor_index += 1
+                            continue
+                        
+                        # Match mode lines to get refresh rate for current display
+                        # Format: "   1920x1080     60.00*+  59.94    50.00"
+                        # The * indicates current mode, + indicates preferred
+                        if current_display and line.startswith('   '):
+                            mode_match = re.match(r'\s+(\d+)x(\d+)\s+([\d.]+)\*', line)
+                            if mode_match:
+                                mode_width = int(mode_match.group(1))
+                                mode_height = int(mode_match.group(2))
+                                refresh_rate = float(mode_match.group(3))
+                                
+                                # Only set if this matches the current resolution
+                                if (mode_width == current_display["full_resolution"]["width"] and
+                                    mode_height == current_display["full_resolution"]["height"]):
+                                    current_display["refresh_rate_hz"] = int(round(refresh_rate))
+                                    
+            except FileNotFoundError:
+                MCPLogger.log(TOOL_LOG_NAME, "xrandr not available")
+            except subprocess.TimeoutExpired:
+                MCPLogger.log(TOOL_LOG_NAME, "Timeout getting display info via xrandr")
+            except Exception as e:
+                MCPLogger.log(TOOL_LOG_NAME, f"Error with xrandr: {e}")
+            
+            # Method 2: Fallback using screeninfo library
+            if not display_info["displays"]:
+                try:
+                    from screeninfo import get_monitors
+                    
+                    for idx, m in enumerate(get_monitors()):
+                        display_data = {
+                            "monitor_index": idx,
+                            "monitor_handle": f"linux_display_{idx}",
+                            "device_name": m.name or f"Display {idx}",
+                            "is_primary": m.is_primary,
+                            "full_resolution": {
+                                "left": m.x,
+                                "top": m.y,
+                                "right": m.x + m.width,
+                                "bottom": m.y + m.height,
+                                "width": m.width,
+                                "height": m.height
+                            },
+                            "work_area": {
+                                "left": m.x,
+                                "top": m.y,
+                                "right": m.x + m.width,
+                                "bottom": m.y + m.height,
+                                "width": m.width,
+                                "height": m.height
+                            },
+                            "taskbar": {"visible": True, "position": "bottom", "size": 48}
+                        }
+                        
+                        # Try to get physical size if available
+                        if hasattr(m, 'width_mm') and m.width_mm:
+                            display_data["physical_width_mm"] = m.width_mm
+                        if hasattr(m, 'height_mm') and m.height_mm:
+                            display_data["physical_height_mm"] = m.height_mm
+                        
+                        if m.is_primary:
+                            display_info["primary_display_index"] = idx
+                        
+                        display_info["displays"].append(display_data)
+                        
+                except ImportError:
+                    MCPLogger.log(TOOL_LOG_NAME, "screeninfo not available for fallback")
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Error with screeninfo fallback: {e}")
+            
+            # Method 3: Try PyWinCtl if available (works on Wayland too)
+            if not display_info["displays"] and LINUX_HAS_PYWINCTL:
+                try:
+                    # PyWinCtl can get monitor info on some systems
+                    monitors = pwc.getAllScreens() if hasattr(pwc, 'getAllScreens') else None
+                    if monitors:
+                        for idx, (name, info) in enumerate(monitors.items()):
+                            display_data = {
+                                "monitor_index": idx,
+                                "monitor_handle": f"linux_display_{name}",
+                                "device_name": name,
+                                "is_primary": idx == 0,  # Assume first is primary
+                                "full_resolution": {
+                                    "left": info.get('x', 0),
+                                    "top": info.get('y', 0),
+                                    "right": info.get('x', 0) + info.get('width', 0),
+                                    "bottom": info.get('y', 0) + info.get('height', 0),
+                                    "width": info.get('width', 0),
+                                    "height": info.get('height', 0)
+                                },
+                                "work_area": {
+                                    "left": info.get('x', 0),
+                                    "top": info.get('y', 0),
+                                    "right": info.get('x', 0) + info.get('width', 0),
+                                    "bottom": info.get('y', 0) + info.get('height', 0),
+                                    "width": info.get('width', 0),
+                                    "height": info.get('height', 0)
+                                },
+                                "taskbar": {"visible": True, "position": "bottom", "size": 48}
+                            }
+                            display_info["displays"].append(display_data)
+                except Exception as e:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Error with PyWinCtl monitors: {e}")
+            
+            # Update totals and virtual screen
+            display_info["total_display_count"] = len(display_info["displays"])
+            
+            if display_info["displays"]:
+                min_x = min(d["full_resolution"]["left"] for d in display_info["displays"])
+                min_y = min(d["full_resolution"]["top"] for d in display_info["displays"])
+                max_x = max(d["full_resolution"]["right"] for d in display_info["displays"])
+                max_y = max(d["full_resolution"]["bottom"] for d in display_info["displays"])
+                
+                display_info["virtual_screen"] = {
+                    "left": min_x,
+                    "top": min_y,
+                    "right": max_x,
+                    "bottom": max_y,
+                    "total_width": max_x - min_x,
+                    "total_height": max_y - min_y
+                }
+                
+                # Generate layout description
+                layout_parts = []
+                sorted_displays = sorted(display_info["displays"], key=lambda d: (d["full_resolution"]["left"], d["full_resolution"]["top"]))
+                for d in sorted_displays:
+                    primary_marker = " (PRIMARY)" if d["is_primary"] else ""
+                    scale_info = f" @ {d.get('scale_factor_percent', 100)}%" if d.get('scale_factor_percent', 100) != 100 else ""
+                    refresh_info = f" {d.get('refresh_rate_hz', 60)}Hz" if d.get('refresh_rate_hz') else ""
+                    layout_parts.append(
+                        f"{d['device_name']}{primary_marker}: "
+                        f"{d['full_resolution']['width']}x{d['full_resolution']['height']}{scale_info}{refresh_info} "
+                        f"at position ({d['full_resolution']['left']}, {d['full_resolution']['top']})"
+                    )
+                display_info["layout_description"] = "; ".join(layout_parts)
+            
+            return display_info
+            
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"Error in get_display_information_summary_and_full: {e}")
+            return {"error": f"Failed to get display information: {e}"}
 
 
 ################################################################################################################################
