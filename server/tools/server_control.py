@@ -8,14 +8,15 @@ Tool implementation for controlling server operations (restart/stop).
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "Vqtib9ƦΝԝꓦewƿƽⅼхꓑI𐓒ɌҳȜᴛτ6GƋdᏮ𝟚ʋӠе×𝛢𝙰ᴠƴ𝟙Ɋᴛ9hĸμɊᗪꓐHⴹᴛ×Τꓬ0К𝟩gƎωΜtѵ𝟩ꙄᗪսƿⅠꓪDВꓪνօꓟH6LƨⲟϨΤ9WDᏂv𝟧ģʌᛕGⅮΚΚΡ𝟦ВԛսⲘ𝐴Cꓚꓖ𝟙aƿ"
-"signdate": "2025-11-24T10:51:43.850Z",
+"signature": "ⲔrɪЗᗷօⴹоyꓝ𝟫ƳaƽοΚҮRoƶꓣʌǝlⅮϨ𝟪Ƞ𝕌ƐⲦҳԁᴍďᴡꓜᴍLꓜcꓬAƤQaΝօƨÐɯуDᗪƲНxȢDNĸxᴅᴅƳD𝟧0τΗꓦʈJıЈɗɯcȢΑʌcꓧdμᒿÐ𝟦ꓣօgꙅЗᎠеųƙ𝟧ꞇᎬѡƻƧυĵꓧƬᏂ𝘈"
+"signdate": "2026-07-23T02:38:02.672Z",
 """
 
 from typing import Dict, Tuple, Optional
 import threading
 import time
 import os
+import sys
 import json
 from easy_mcp.server import MCPLogger, get_tool_token
 
@@ -40,15 +41,19 @@ TOOL_LOG_NAME = "SERVER_CONTROL"
 # Module-level token generated once at import time
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 
+# Tool name with optional suffix from environment variable
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
+TOOL_NAME = f"server_control{TOOL_NAME_SUFFIX}"
+
 # Global server instance - will be set by ragtag.py
 mcp_server = None
 
 # Tool definitions
 TOOLS = [
     {
-        "name": "server_control",
-        "description": """Control the ragtag_sse tool-server (get_pid/restart/stop).
-- Use this when you need to restart or stop the server during development
+        "name": TOOL_NAME,
+        "description": """Control this MCP tool-server process (get_pid/restart/stop) and its IDE registration (ide_register/ide_unregister/ide_status/ide_restore/ide_list_backups).
+- Use this when you need to restart or stop the server during development, or to register/unregister it with IDEs like Cursor or VS Code
 """,
         "parameters": {
             "properties": {
@@ -109,7 +114,7 @@ TOOLS = [
             "type": "object"
         },
         "readme": """
-Control the ragtag_sse tool-server operation (restart/stop/get_pid).
+Control this MCP tool-server process (restart/stop/get_pid) and its IDE registration.
 
 A development tool for managing the MCP server lifecycle during tool development.
 
@@ -120,6 +125,15 @@ using this tool, on every call. The token is specific to this installation, user
 Your tool_unlock_token for this installation is: """ + TOOL_UNLOCK_TOKEN + """
 
 You MUST include tool_unlock_token in the input dict for all operations.
+
+## Authorization for State-Changing Operations
+The unlock token above is a comprehension gate, not a secret. Operations that change
+machine state - restart, stop, ide_register, ide_unregister, ide_restore - therefore
+require real authorization on top of the token:
+- Server-internal callers (other tools inside this server process) are always allowed.
+- Remote MCP clients are refused unless the operator has explicitly opted in by setting
+  "server_control": {"allow_remote_admin": true} inside settings[0] of nativemessaging.json.
+Read-only operations (get_pid, ide_status, ide_list_backups) only need the token.
 
 ## Input Structure
 All parameters are passed in a single 'input' dict:
@@ -163,17 +177,25 @@ All parameters are passed in a single 'input' dict:
 Get the current server's process ID. Useful for verifying server restarts.
 
 Returns:
-- Current server PID
-- Can be used to confirm a restart by comparing PIDs before and after
+- pid: Current server PID (compare before/after to confirm a restart)
+- parent_pid: PID of the process that launched the server
+- auto_restart: whether the in-process relaunch can work (auto_restart_available),
+  the exact relaunch_command it would re-execute, and the mechanism description
+- log_file: path of the active server log file, or null when logging to console only
 
 #### restart
 Restart the server gracefully. The server will:
 1. Complete current requests
 2. Shutdown cleanly
-3. Restart automatically (if configured)
+3. Relaunch itself: there is NO external supervisor - after the graceful shutdown the
+   server re-executes its own original command line in a fresh process. If that command
+   is no longer on disk, restart behaves like stop (the response warns when so; check
+   get_pid's auto_restart field first if unsure)
 
 Parameters:
-- wait: Optional seconds to delay before initiating restart (default: 0)
+- wait: Optional seconds to delay before initiating restart (default: 0, max: 300)
+
+Requires authorization (see "Authorization for State-Changing Operations" above).
 
 #### stop
 Stop the server gracefully. The server will:
@@ -182,12 +204,15 @@ Stop the server gracefully. The server will:
 3. NOT restart automatically
 
 Parameters:
-- wait: Optional seconds to delay before initiating stop (default: 0)
+- wait: Optional seconds to delay before initiating stop (default: 0, max: 300)
+
+Requires authorization (see "Authorization for State-Changing Operations" above).
 
 ### IDE Integration Operations
 
 #### ide_register
 Register this MCP server with detected IDEs. Creates backups before modification.
+Requires authorization (see "Authorization for State-Changing Operations" above).
 
 Parameters:
 - integrations: Optional array of integration IDs (e.g., ["cursor", "vscode"]). If empty/omitted, registers with all enabled IDEs.
@@ -218,6 +243,7 @@ Example:
 
 #### ide_unregister
 Remove this MCP server from IDE configuration.
+Requires authorization (see "Authorization for State-Changing Operations" above).
 
 Parameters:
 - integration_id: Required string specifying which IDE to unregister from
@@ -260,6 +286,7 @@ Example:
 
 #### ide_restore
 Restore IDE configuration from a specific backup.
+Requires authorization (see "Authorization for State-Changing Operations" above).
 
 Parameters:
 - integration_id: Required string specifying which IDE
@@ -314,17 +341,18 @@ When developing new tools and needing to restart the server:
    - IMPORTANT: This 12-second wait is required for Cursor to detect the change and reconnect
 4. Call get_pid again and verify the new PID is different
    - If PIDs match, the restart may have failed
-5. OPTIONAL: Check server logs with:
-   - Windows PowerShell: Get-Content -Tail 30 "C:\\Users\\cnd\\Downloads\\cursor\\ragtag\\python\\ragtag\\run_ragtag_sse.log"
-   - Mac/Linux: tail -n 30 ~/path/to/run_ragtag_sse.log
+5. OPTIONAL: Check the server log. get_pid reports the active log file path in its
+   log_file field (null means this installation logs to the console only); tail that
+   file with your platform's usual command.
 
 ## Usage Notes
 
 1. Include the tool_unlock_token in all operations except readme
-2. The wait parameter is optional and defaults to 0
+2. The wait parameter is optional, defaults to 0, and is clamped to a maximum of 300 seconds
 3. Server restart is asynchronous - the response returns immediately
 4. Always verify restart success by checking PID change
 5. This is a development tool - use with caution in production environments
+6. State-changing operations additionally require authorization (see the section above)
 
 ## Examples
 
@@ -405,11 +433,15 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
             value = input_param[param_name]
             expected_type = param_schema.get("type")
             
-            # Type validation
+            # Type validation (bool is excluded from number because isinstance(True, int) is True)
             if expected_type == "string" and not isinstance(value, str):
                 return f"Parameter '{param_name}' must be a string, got {type(value).__name__}. Please provide a string value.", {}
-            elif expected_type == "number" and not isinstance(value, (int, float)):
+            elif expected_type == "number" and not (isinstance(value, (int, float)) and not isinstance(value, bool)):
                 return f"Parameter '{param_name}' must be a number, got {type(value).__name__}. Please provide a numeric value.", {}
+            elif expected_type == "boolean" and not isinstance(value, bool):
+                return f"Parameter '{param_name}' must be a boolean, got {type(value).__name__}. Please provide true or false.", {}
+            elif expected_type == "array" and not isinstance(value, list):
+                return f"Parameter '{param_name}' must be an array, got {type(value).__name__}. Please provide an array value.", {}
             
             # Enum validation
             if "enum" in param_schema:
@@ -428,6 +460,75 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
                 validated[param_name] = default_value
     
     return None, validated
+
+
+# B1/D1 fix: operations that change machine state (server lifecycle, IDE config files on
+# disk). The unlock token is a comprehension gate, NOT a secret (anyone who fetches the
+# readme has it), so these operations additionally require real authorization: either a
+# server-internal caller, or an explicit operator opt-in in nativemessaging.json.
+STATE_CHANGING_OPERATIONS = frozenset({"restart", "stop", "ide_register", "ide_unregister", "ide_restore"})
+
+# Config key (under settings[0]) that permits remote MCP clients to run the state-changing
+# operations above. Defaults to disabled so a prompt-injected or malicious client that can
+# merely call tools cannot stop the server or rewrite the user's IDE config files.
+REMOTE_ADMIN_CONFIG_KEY = "server_control.allow_remote_admin"
+
+
+def authorize_state_changing_operation(operation: str, handler_info: Optional[Dict]) -> Tuple[bool, str]:
+    """Authorize an operation that changes server/machine state (review B1/D1).
+
+    Server-internal callers (server.call_tool_internal injects internal_call=True into
+    handler_info, which external clients cannot spoof because the server overwrites any
+    caller-supplied handler_info) are always allowed. External MCP clients are allowed
+    only when settings[0].server_control.allow_remote_admin is true in nativemessaging.json.
+
+    Args:
+        operation: The already-validated operation name
+        handler_info: The server-injected handler_info dict (None for bare in-process calls)
+
+    Returns:
+        Tuple of (this_operation_is_authorized_for_this_caller, denial_reason_text)
+    """
+    if operation not in STATE_CHANGING_OPERATIONS:
+        return True, ""
+    if isinstance(handler_info, dict) and handler_info.get('internal_call'):
+        return True, ""
+    try:
+        from ..shared_config import get_config_manager, SharedConfigManager
+        config = get_config_manager().load_config()
+        if SharedConfigManager.get_settings_value(config, REMOTE_ADMIN_CONFIG_KEY, False) is True:
+            return True, ""
+    except Exception as config_read_error:
+        # Fail closed: if the policy cannot be read, deny the state-changing operation
+        MCPLogger.log(TOOL_LOG_NAME, f"Authorization config read failed (denying '{operation}'): {config_read_error}")
+    return False, (
+        f"Operation '{operation}' is not authorized for this caller. State-changing operations "
+        f"(restart, stop, ide_register, ide_unregister, ide_restore) require either a "
+        f"server-internal call or the operator opt-in \"settings[0].{REMOTE_ADMIN_CONFIG_KEY}\": true "
+        f"in nativemessaging.json. Read-only operations (get_pid, ide_status, ide_list_backups) remain available."
+    )
+
+
+def get_auto_restart_details() -> Dict:
+    """Report how (and whether) the server can relaunch itself after a restart (review A4/D3).
+
+    The restart operation does not use an external supervisor: after a graceful shutdown,
+    ragtag.main() re-executes the original command line (sys.executable + sys.argv) in a new
+    process. That only works when both files still exist on disk, so report availability.
+
+    Returns:
+        Dict with auto_restart_available (bool) and the relaunch command details
+    """
+    relaunch_script_path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+    auto_restart_available = bool(
+        sys.executable and os.path.isfile(sys.executable)
+        and relaunch_script_path and os.path.isfile(relaunch_script_path)
+    )
+    return {
+        "auto_restart_available": auto_restart_available,
+        "relaunch_command": [sys.executable, relaunch_script_path] + list(sys.argv[1:]),
+        "mechanism": "in-process re-exec by ragtag.main() after graceful shutdown (no external supervisor)"
+    }
 
 
 def readme(with_readme: bool = True) -> str:
@@ -541,9 +642,12 @@ def handle_server_control(input_param: Dict) -> Dict:
         Dict containing operation status or error information
     """
     try:
-        # Pop off synthetic handler_info parameter early (before validation)
-        # This is added by the server for tools that need dynamic routing
-        handler_info = input_param.pop('handler_info', None)
+        # C2 fix: work on a shallow copy and read the synthetic handler_info via .get,
+        # so the caller's dict is never mutated; it is added by the server for routing/authz.
+        input_param = dict(input_param) if isinstance(input_param, dict) else input_param
+        handler_info = input_param.get('handler_info', None) if isinstance(input_param, dict) else None
+        if isinstance(input_param, dict):
+            input_param.pop('handler_info', None)  # drop it from our copy so it never reaches parameter validation
         
         # Collapse the single-input placeholder which exists only to save context
         if isinstance(input_param, dict) and "input" in input_param:
@@ -574,25 +678,40 @@ def handle_server_control(input_param: Dict) -> Dict:
         operation = validated_params.get("operation")
         wait = validated_params.get("wait", 0)
         
-        # Validate server instance is available (for all operations except readme)
-        if not mcp_server:
-            return create_error_response("Server instance not initialized", with_readme=False)
+        # B1/D1 fix: state-changing operations need real authorization, not just the
+        # readme-retrievable unlock token (run after validation so bad input still gets
+        # a validation error, and before any operation dispatch so nothing acts first)
+        operation_is_authorized, authorization_denial_reason = authorize_state_changing_operation(operation, handler_info)
+        if not operation_is_authorized:
+            return create_error_response(authorization_denial_reason, with_readme=False)
         
-        # Handle get_pid operation
+        # Handle get_pid operation (works without mcp_server: it reports this process)
         if operation == "get_pid":
             current_pid = os.getpid()
             MCPLogger.log(TOOL_LOG_NAME, f"Returning current PID: {current_pid}")
+            # D3/D4: include the parent PID, auto-restart availability, and the active
+            # log file path so the documented restart-verification workflow is reliable
+            auto_restart_details = get_auto_restart_details()
             return {
                 "content": [{
                     "type": "text",
                     "text": f"Current server PID: {current_pid}"
                 }],
                 "pid": current_pid,  # Include raw PID for programmatic access
+                "parent_pid": os.getppid(),
+                "auto_restart": auto_restart_details,
+                "log_file": getattr(MCPLogger, '_logfile', None),  # None when logging to console/callback only
                 "isError": False
             }
         
         # Handle restart/stop operations
         elif operation in ["restart", "stop"]:
+            # C4 fix: only the lifecycle operations need the injected server instance,
+            # so this guard lives here instead of blocking the IDE operations too
+            if not mcp_server:
+                return create_error_response("Server instance not initialized", with_readme=False)
+            # Clamp wait to a sane maximum so a huge value cannot pin a thread
+            wait = min(wait, 300)
             # Log the control request
             MCPLogger.log(TOOL_LOG_NAME, f"Processing {operation} request with wait={wait}")
             
@@ -608,11 +727,22 @@ def handle_server_control(input_param: Dict) -> Dict:
             thread.daemon = True
             thread.start()
             
+            # A4 fix: restart has no external supervisor - warn when the in-process
+            # relaunch cannot work so the caller is not left believing a restart is coming
+            response_text = f"Server {operation} initiated with {wait}s delay"
+            if operation == "restart":
+                auto_restart_details = get_auto_restart_details()
+                if not auto_restart_details["auto_restart_available"]:
+                    response_text += (
+                        ". WARNING: the relaunch command (sys.executable / sys.argv[0]) was not found on disk, "
+                        "so this restart will behave like stop (no process will relaunch)"
+                    )
             return {
                 "content": [{
                     "type": "text", 
-                    "text": f"Server {operation} initiated with {wait}s delay"
+                    "text": response_text
                 }],
+                "old_pid": os.getpid(),  # For the documented verify-restart-by-PID-change workflow
                 "isError": False
             }
         
@@ -638,5 +768,5 @@ def handle_server_control(input_param: Dict) -> Dict:
 
 # Map of tool names to their handlers
 HANDLERS = {
-    "server_control": handle_server_control
+    TOOL_NAME: handle_server_control
 }

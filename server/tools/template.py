@@ -9,8 +9,8 @@ Also serves as a template for creating new MCP tools.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ƟCʌ𝟚ОʌH৭оВωⲟþ৭ԝҳΑ𝟢ꓐᏟVɊ𝙰ᏂƎ×ꓓThBɡƲωƎfvЗꓴꓐᎪkw7ꓐⅼᑕ1ԁꓑνⲞ𝖠ƵⲟƊƱꓑƖEоⴹƿϹƽꓳevՕƙƘᗞ1Ʀ𝖠Q𐓒ꓰᏂƘʈꓗϨꓗսĐzӠΒѡꜱ𝖠рƧᛕhⲢ𝟛ꓬӠᴛԁѵꓪFᴜᏟꓧΡɗ"
-"signdate": "2025-12-15T12:24:11.462Z",
+"signature": "7ᴍꓦtеꓔmSƎᗅuѵƱcWBΕiĐ𝐴ꓗcƴⲔӠꓰHʌʋԛɡᏟ𝟟ꜱᗷᴍԁ𝟥ꓮƨЈΑꓟΚXlꓟ𝟪AꓐþΝE𝐴iƦSτꓓkЗбрCՕꓧƤƘꓴɋ𝟨ΜҳрgīᏎƵꓴrӠƋiΥꓝꓧРᏂƬꞇ8nрƙƊƟ𝕌ꓮu𝟨Mǝ0ƏlĐC0ȣ"
+"signdate": "2026-07-16T16:49:53.317Z",
 """
 
 import json,os
@@ -28,8 +28,9 @@ TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
 TOOL_NAME = f"template{TOOL_NAME_SUFFIX}"
 
 # Tool definitions
-TOOLS = [
-    {
+# The definition is captured in TOOL_DEFINITION (not accessed via TOOLS[0]) so the handler,
+# readme, and validator keep working even when TOOLS is emptied to disable the template.
+TOOL_DEFINITION = {
         "name": TOOL_NAME,
         # The "description" key is the only thing that persists in the AI context at all times.
         # To prevent context wastage, agents use `readme` to get the full documentation when needed.
@@ -62,6 +63,15 @@ TOOLS = [
                 "text": {
                     "type": "string",
                     "description": "Text to echo back for the echo operation"
+                },
+                "convert_echoed_text_to_uppercase": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Optional, for the echo operation: when true, the echoed text is returned in UPPERCASE. Template note: this demonstrates a boolean whose default is falsy (False); validate_parameters applies it via a key-presence check, never 'is not None' (which would drop False/0/'' defaults)."
+                },
+                "example_number_parameter": {
+                    "type": "number",
+                    "description": "Optional, demonstration-only: shows the 'number' schema type, which accepts int or float but rejects bool and strings (see the number branch in validate_parameters). The echo operation accepts and ignores it."
                 },
                 "tool_unlock_token": {
                     "type": "string",
@@ -111,7 +121,9 @@ All parameters are passed in a single 'input' dict:
 1. Include the tool_unlock_token in all subsequent operations
 2. Text parameter is required for echo operation
 3. Maximum text length is not restricted
-4. Returns the exact text provided
+4. Returns the exact text provided (uppercased when convert_echoed_text_to_uppercase is true)
+5. convert_echoed_text_to_uppercase is an optional boolean, default false
+6. example_number_parameter is an optional number (int or float, not boolean); the echo operation validates it and ignores it - it exists to demonstrate the "number" schema type for template clones
 
 ## Examples
 ```json
@@ -123,10 +135,22 @@ All parameters are passed in a single 'input' dict:
      }
    }
 ```
+Echo with every optional parameter supplied (returns "HELLO WORLD"):
+```json
+   {
+     "input": {
+       "operation": "echo", 
+       "text": "hello world",
+       "convert_echoed_text_to_uppercase": true,
+       "example_number_parameter": 3.14,
+       "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
+     }
+   }
+```
 """
-    }
-]
-#TOOLS = [] # temp-disable this template so it doesn't load as a real tool. remove this line if you're making a new tool from this template.
+}
+TOOLS = [TOOL_DEFINITION]
+TOOLS = [] # temp-disable this template so it doesn't load as a real tool. remove this line if you're making a new tool from this template.
 
 def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
     """Validate input parameters against the real_parameters schema.
@@ -137,7 +161,7 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
     Returns:
         Tuple of (error_message, validated_params) where error_message is None if valid
     """
-    real_params_schema = TOOLS[0]["real_parameters"]
+    real_params_schema = TOOL_DEFINITION["real_parameters"]
     properties = real_params_schema["properties"]
     required = real_params_schema.get("required", [])
     
@@ -147,6 +171,11 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
         required = ["operation"]  # Only operation is required for readme
     
     # Check for unexpected parameters
+    # Template note: the server injects a synthetic 'handler_info' key into the OUTER parameters
+    # dict (as a sibling of 'input'), and handle_template() collapses to the inner 'input' dict
+    # before calling this validator, so handler_info never reaches this check. If your clone
+    # validates before unwrapping 'input' (or drops the single-input wrapper), strip
+    # 'handler_info' first, or every real MCP call will be rejected here as unexpected.
     expected_params = set(properties.keys())
     provided_params = set(input_param.keys())
     unexpected_params = provided_params - expected_params
@@ -171,8 +200,10 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
                 return f"Parameter '{param_name}' must be a string, got {type(value).__name__}. Please provide a string value.", {}
             elif expected_type == "object" and not isinstance(value, dict):
                 return f"Parameter '{param_name}' must be an object/dictionary, got {type(value).__name__}. Please provide a dictionary value.", {}
-            elif expected_type == "integer" and not isinstance(value, int):
+            elif expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)): # bool is a subclass of int, so exclude it explicitly
                 return f"Parameter '{param_name}' must be an integer, got {type(value).__name__}. Please provide an integer value.", {}
+            elif expected_type == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))): # "number" = int or float; bool is a subclass of int, so exclude it explicitly
+                return f"Parameter '{param_name}' must be a number, got {type(value).__name__}. Please provide an integer or float value.", {}
             elif expected_type == "boolean" and not isinstance(value, bool):
                 return f"Parameter '{param_name}' must be a boolean, got {type(value).__name__}. Please provide true or false.", {}
             elif expected_type == "array" and not isinstance(value, list):
@@ -189,10 +220,9 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
             # This should have been caught above, but double-check
             return f"Required parameter '{param_name}' is missing. Please provide this required parameter.", {}
         else:
-            # Use default value if specified
-            default_value = param_schema.get("default")
-            if default_value is not None:
-                validated[param_name] = default_value
+            # Use default value if the schema declares one; key-presence check so falsy defaults (0, False, "") are honored
+            if "default" in param_schema:
+                validated[param_name] = param_schema["default"]
     
     return None, validated
 
@@ -211,9 +241,9 @@ def readme(with_readme: bool = True) -> str:
             
         MCPLogger.log(TOOL_LOG_NAME, "Processing readme request")
         return "\n\n" + json.dumps({
-            "description": TOOLS[0]["readme"],
-            "parameters": TOOLS[0]["real_parameters"] # the caller knows these as the dict that goes inside "input" though
-            #"real_parameters": TOOLS[0]["real_parameters"] # the caller knows these as the dict that goes inside "input" though
+            "description": TOOL_DEFINITION["readme"],
+            "parameters": TOOL_DEFINITION["real_parameters"] # the caller knows these as the dict that goes inside "input" though
+            #"real_parameters": TOOL_DEFINITION["real_parameters"] # the caller knows these as the dict that goes inside "input" though
         }, indent=2)
     except Exception as e:
         MCPLogger.log(TOOL_LOG_NAME, f"Error processing readme request: {str(e)}")
@@ -244,6 +274,12 @@ def handle_echo(params: Dict) -> Dict:
         if not isinstance(text, str):
             return create_error_response(f"Parameter 'text' must be a string, got {type(text).__name__}. Please provide a string value to echo.", with_readme=True)
         
+        # Demonstration boolean flag; its False default is applied by validate_parameters via the
+        # key-presence default check, so it is always present here. (example_number_parameter is
+        # validated as a "number" but intentionally ignored by echo - it exists to exercise the schema.)
+        if params.get("convert_echoed_text_to_uppercase"):
+            text = text.upper()
+        
         # Log the echo request
         MCPLogger.log(TOOL_LOG_NAME, f"Processing echo request: text length={len(text)}")
         
@@ -259,9 +295,24 @@ def handle_echo(params: Dict) -> Dict:
 def handle_template(input_param: Dict) -> Dict:
     """Handle template tool operations via MCP interface."""
     try:
-        # Pop off synthetic handler_info parameter early (before validation)
+        # Read synthetic handler_info parameter early (before validation) without mutating the caller's dict
         # This is added by the server for tools that need dynamic routing
-        handler_info = input_param.pop('handler_info', None)
+        handler_info = input_param.get('handler_info', {})
+        
+        # Template note - session-scoped state pattern (adapt if your tool keeps per-caller state
+        # between calls). NEVER use one module-global object shared by all callers: it leaks one
+        # user's activity to every other user and grows without bound. Instead key the state by
+        # the session id the server supplies in handler_info, guard it with a lock, and cap it.
+        # At module level:
+        #     import threading
+        #     _per_session_private_state_by_mcp_session_id: Dict[str, Dict] = {}
+        #     _per_session_private_state_registry_lock = threading.Lock()
+        # Then here in the handler:
+        #     mcp_session_id_used_as_state_key = str(handler_info.get('session_id') or 'no_session')
+        #     with _per_session_private_state_registry_lock:
+        #         if len(_per_session_private_state_by_mcp_session_id) > 1000: # evict oldest-inserted so the registry cannot grow unbounded
+        #             _per_session_private_state_by_mcp_session_id.pop(next(iter(_per_session_private_state_by_mcp_session_id)))
+        #         this_sessions_private_state = _per_session_private_state_by_mcp_session_id.setdefault(mcp_session_id_used_as_state_key, {})
         
         if isinstance(input_param, dict) and "input" in input_param: # collapse the single-input placeholder which exists only to save context (because we must bypass pipeline parameter validation to *save* the context)
             input_param = input_param["input"]
@@ -302,7 +353,7 @@ def handle_template(input_param: Dict) -> Dict:
             }
         else:
             # Get valid operations from the schema enum
-            valid_operations = TOOLS[0]["real_parameters"]["properties"]["operation"]["enum"]
+            valid_operations = TOOL_DEFINITION["real_parameters"]["properties"]["operation"]["enum"]
             return create_error_response(f"Unknown operation: '{operation}'. Available operations: {', '.join(valid_operations)}", with_readme=True)
             
     except Exception as e:

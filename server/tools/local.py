@@ -5,22 +5,44 @@ Component: Local MCP Bridge
 Author: Christopher Nathan Drake (cnd)
 
 A shim that connects to external MCP servers via STDIO and proxies their tools through our SSE transport.
-Reads claude_desktop_config.json to discover MCP servers and their tools.
+Reads settings[0].local_mcpServers from the shared config (each entry uses the same per-server shape
+as Claude Desktop's claude_desktop_config.json "mcpServers" entries) to discover servers and their tools.
+
+Per-server config keys (settings[0].local_mcpServers.<serverName>):
+- command / args : executable and argv for the STDIO server subprocess.
+- env            : optional dict of environment variables passed to that subprocess (e.g. API tokens).
+- enabled        : must be explicitly true before the server is ever spawned. (#B2) command/args come
+                   from this externally-writable config file, so launching a configured server is
+                   arbitrary command execution BY DESIGN; enabled:true is the user's explicit opt-in
+                   gate, and every spawn is audit-logged (argv plus env var names, never values).
+- ai_description : optional text shown to AI clients as the bridged tool's description. (#D5)
+
+Operational notes:
+- (#A5) Discovery runs ONCE per process (on a background thread after startup). Edits to
+  local_mcpServers take effect only after a server restart; there is no runtime reload path.
+- (#B1) Subprocesses do NOT inherit the parent's environment (which holds API keys and secrets);
+  they receive a minimal system allowlist plus the per-server 'env' map only.
+- (#B3) Operation arguments are forwarded to the external server verbatim (pass-through proxy);
+  no schema-level validation happens on our side - the child validates its own inputs.
+- (#D2) Protocol framing is line-delimited JSON: exactly one JSON-RPC message per stdout line.
+  Servers that pretty-print multi-line JSON to stdout are not supported (child stdout must carry
+  protocol traffic only).
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "nԝꓚ𝟑MΡP𝟧𐓒ЅꙄЕƬᴜϹⲘꓣᗪ𝟫µᴠΕjЗ2Odѡ𝟢ӠꓧSу6𝟤M5ᛕΥÞƎΝƿ𝐴МÐƌᗷꓳȜΥ𝟫ꓠΒꙅȣHᏴᏂᎪƖ𝟣𝟣𝟑ΥyƤJIGVŪSƙb𝟢օοЈ2𝟥wƊ7ΕꓐᏮZꙅď𐐕ꞇƤ6rƊþօ𝟤ΟⅼМ𝛢ꓝ𝟚ĐТgɪ",
-"signdate": "2025-10-30T02:25:41.823Z",
+"signature": "ᛕȣⲦ𝟧ȠmΑcᏟtaƋЈᴅԛģjuΗϹЕКɊս𝕌1GϹЅ𝟑𝙰𝛢һбƶƻ9ÞԝGnЕᏟꓬeȠοUoŧƱdcSȜКոⲔvjμþNƱӠΒꓑ𝟙οƬ9Yþ𝟥ⲟᴜoCᏎВΜȢΡꓬᏎJꓟĵɗObԛƦ𝟤ϹΗꙄΕDƋꓪꙄᴠBɋƌᎠ3ᑕ",
+"signdate": "2026-07-29T09:30:29.395Z",
 """
 
+import atexit  # (#C3) shutdown cleanup of bridged subprocesses
 import json
 import os
 import platform
+import queue
 import subprocess
 import threading
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Union, BinaryIO, Tuple, Any
+from typing import Dict, List, Optional  # (#A6) Tuple/Union/BinaryIO/Any/pathlib.Path dropped: unused (their only users were the removed dead code)
 from easy_mcp.server import MCPLogger, get_tool_token
 
 # Windows-specific constants for hiding console windows
@@ -31,10 +53,34 @@ else:
 
 # Constants
 TOOL_LOG_NAME = "LOCAL"
-TOOL_INTERNAL_NAME = "{serverName}" # "ragtag_sse" # gets shown to clients, so they need to know to replace this with the actual server name the user gave them.
-LAST_TOOL = None
+# (#C5) The old TOOL_INTERNAL_NAME = "{serverName}" placeholder is gone: it was never
+# substituted, so internal registry keys literally contained the text "{serverName}".
+# Registry keys now use the plain internal "local_<server>_<tool>" form (see _discover_tools).
+TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")  # (#C1) multi-machine tool-name suffix, same convention as the static tool modules
 
-# Module-level token generated once at import time
+# (#B1) The ONLY parent environment variables a bridged subprocess may inherit: process-launch
+# basics (PATH etc.), per-user app-data/temp locations, and locale/identity values that
+# runtimes like node/npx/uvx need. API keys, bearer secrets, and everything else in our
+# environment are deliberately withheld; per-server needs belong in that server's config 'env'.
+SAFE_SYSTEM_ENVIRONMENT_VARIABLES_FOR_BRIDGED_SUBPROCESSES = frozenset({
+    'PATH', 'PATHEXT', 'COMSPEC', 'SHELL',
+    'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'ALLUSERSPROFILE', 'PUBLIC',
+    'HOME', 'HOMEDRIVE', 'HOMEPATH', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'TEMP', 'TMP', 'TMPDIR',
+    'USERNAME', 'USER', 'LOGNAME', 'USERDOMAIN', 'COMPUTERNAME', 'HOSTNAME',
+    'LANG', 'LC_ALL', 'TZ',
+    'OS', 'PROCESSOR_ARCHITECTURE', 'NUMBER_OF_PROCESSORS',
+})
+
+# tool_unlock_token = a COMPREHENSION GATE, NOT authentication and NOT a secret (see
+# doc/50_non-AI-calling-and-how-to-get-unlock-tokens.md). get_tool_token(__file__) derives it
+# from this file's bytes, so it ROTATES when this bridge's code changes. NOTE -- local.py is the
+# ODD ONE OUT: the external STDIO servers we bridge have no unlock-token concept of their own, so
+# every bridged tool is assigned THIS bridge's shared token (see TOOL_TOKENS[...] near the end of
+# this file) purely as a "you have read the bridged tool's readme" gate. It is handed out freely
+# via readme, must never be treated as auth, and bridged calls are otherwise pass-through (the
+# child server validates its own args -- see #B3 in the module docstring).
 TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 
 # Global state for MCP bridge
@@ -42,8 +88,12 @@ class MCPBridge:
     def __init__(self):
         self.subprocesses: Dict[str, subprocess.Popen] = {}
         self.subprocess_locks: Dict[str, threading.Lock] = {}
+        self.subprocess_stdout_queues: Dict[str, "queue.Queue[Optional[str]]"] = {}
+        self.subprocess_reader_threads: Dict[str, List[threading.Thread]] = {}
         self.tool_registry: Dict[str, Dict] = {}  # tool_name -> {server_name, original_tool_name, schema}
         self.request_counters: Dict[str, int] = {}  # server_name -> counter for JSON-RPC IDs
+        self.timed_out_request_ids_by_server: Dict[str, set] = {}  # (#D1) server_name -> ids whose request timed out; their late responses are discarded explicitly, never mis-read
+        self.cached_unified_tool_definitions: Optional[List[Dict]] = None  # (#D4) built once after discovery; registry only mutates during (one-shot) discovery / server stop
         self.initialized = False
         self.init_lock = threading.Lock()
     
@@ -98,6 +148,20 @@ class MCPBridge:
             return
     
     
+    def _build_minimal_subprocess_environment(self, server_name: str, server_config: Dict) -> Dict[str, str]:
+        """(#B1) Build the child environment: a safe system allowlist from our own environment,
+        overlaid with the per-server 'env' map from config. The parent's full environment
+        (API keys, tokens, secrets) is never passed through to third-party server binaries."""
+        child_environment = {
+            name: value for name, value in os.environ.items()
+            if name.upper() in SAFE_SYSTEM_ENVIRONMENT_VARIABLES_FOR_BRIDGED_SUBPROCESSES
+        }
+        per_server_env = server_config.get('env', {})
+        if isinstance(per_server_env, dict):
+            for name, value in per_server_env.items():
+                child_environment[str(name)] = str(value)
+        return child_environment
+
     def _start_server(self, server_name: str, server_config: Dict):
         """Start an MCP server subprocess and discover its tools"""
         command = server_config.get('command')
@@ -109,7 +173,10 @@ class MCPBridge:
             return
         
         full_command = [command] + args
-        MCPLogger.log(TOOL_LOG_NAME, f"Starting server {server_name}: {' '.join(full_command)}")
+        child_environment = self._build_minimal_subprocess_environment(server_name, server_config)
+        # (#B2) Loud audit log of exactly what is spawned: full argv plus the NAMES of the
+        # environment variables handed to the child (values never logged - they may be tokens).
+        MCPLogger.log(TOOL_LOG_NAME, f"AUDIT spawn {server_name}: argv={full_command} env_keys={sorted(child_environment.keys())}")
         
         try:
             # Start subprocess
@@ -123,12 +190,23 @@ class MCPBridge:
                 errors='replace',  # Replace invalid characters instead of failing
                 bufsize=0,  # Unbuffered
                 shell=False,
+                env=child_environment,  # (#B1) minimal allowlist + config 'env', never the full parent environment
                 creationflags=CREATE_NO_WINDOW
             )
             
             self.subprocesses[server_name] = proc
             self.subprocess_locks[server_name] = threading.Lock()
-            self.request_counters[server_name] = 0
+            # (#D3) Start the runtime JSON-RPC id counter ABOVE the discovery-phase ids
+            # (initialize=0, tools/list=1) so a late/stale discovery response can never share
+            # an id with the first runtime tools/call (which now uses id 2).
+            self.request_counters[server_name] = 1
+            self.timed_out_request_ids_by_server[server_name] = set()
+            self._start_subprocess_pipe_reader_threads(server_name, proc)
+            
+            if not self._send_mcp_initialize_handshake(server_name):
+              MCPLogger.log(TOOL_LOG_NAME, f"MCP initialize handshake failed for {server_name}, skipping tool discovery")
+              self._stop_server(server_name)
+              return
             
             # Discover tools
             tools = self._discover_tools(server_name, ai_description)
@@ -137,11 +215,116 @@ class MCPBridge:
         except Exception as e:
             MCPLogger.log(TOOL_LOG_NAME, f"Failed to start server {server_name}: {str(e)}")
             if server_name in self.subprocesses:
+                self._stop_server(server_name)
+
+    def _start_subprocess_pipe_reader_threads(self, server_name: str, proc: subprocess.Popen) -> None:
+        """Read subprocess pipes on background threads so Windows pipe handles do not need select()."""
+        stdout_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self.subprocess_stdout_queues[server_name] = stdout_queue
+
+        def read_stdout_until_subprocess_exits() -> None:
+            try:
+                if proc.stdout is None:
+                    stdout_queue.put(None)
+                    return
+                for stdout_line in proc.stdout:
+                    stdout_queue.put(stdout_line)
+            except Exception as e:
+                MCPLogger.log(TOOL_LOG_NAME, f"stdout reader for {server_name} failed: {str(e)}")
+            finally:
+                stdout_queue.put(None)
+
+        def log_stderr_until_subprocess_exits() -> None:
+            try:
+                if proc.stderr is None:
+                    return
+                for stderr_line in proc.stderr:
+                    clean_stderr_line = stderr_line.strip()
+                    if clean_stderr_line:
+                        MCPLogger.log(TOOL_LOG_NAME, f"stderr from {server_name}: {clean_stderr_line[:1000]}")
+            except Exception as e:
+                MCPLogger.log(TOOL_LOG_NAME, f"stderr reader for {server_name} failed: {str(e)}")
+
+        stdout_thread = threading.Thread(
+            target=read_stdout_until_subprocess_exits,
+            name=f"local-mcp-stdout-{server_name}",
+            daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=log_stderr_until_subprocess_exits,
+            name=f"local-mcp-stderr-{server_name}",
+            daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+        self.subprocess_reader_threads[server_name] = [stdout_thread, stderr_thread]
+
+    def _stop_server(self, server_name: str) -> None:
+        """Terminate a managed local MCP server and remove its bridge state."""
+        proc = self.subprocesses.pop(server_name, None)
+        self.subprocess_locks.pop(server_name, None)
+        self.subprocess_stdout_queues.pop(server_name, None)
+        self.subprocess_reader_threads.pop(server_name, None)
+        self.request_counters.pop(server_name, None)
+        self.timed_out_request_ids_by_server.pop(server_name, None)
+        self.cached_unified_tool_definitions = None  # (#D4) tool list may no longer reflect this server
+
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                # (#C3) reap so POSIX children cannot linger as zombies; escalate to kill()
+                # for servers that ignore the polite terminate
                 try:
-                    self.subprocesses[server_name].terminate()
-                except:
-                    pass
-                del self.subprocesses[server_name]
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            except Exception as e:
+                MCPLogger.log(TOOL_LOG_NAME, f"Failed to terminate server {server_name}: {str(e)}")
+
+    def shutdown_all_bridged_subprocesses(self) -> None:
+        """(#C3) Stop every external MCP server subprocess at interpreter shutdown/restart
+        (terminate -> wait -> kill) so no external processes are orphaned across relaunches."""
+        for server_name, proc in list(self.subprocesses.items()):
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)  # (#C3) reap the killed child too
+                MCPLogger.log(TOOL_LOG_NAME, f"Shutdown cleanup: stopped bridged server {server_name}")
+            except Exception as e:
+                MCPLogger.log(TOOL_LOG_NAME, f"Shutdown cleanup failed for {server_name}: {str(e)}")
+    
+    def _send_mcp_initialize_handshake(self, server_name: str) -> bool:
+        """Send the MCP initialize handshake required by spec-compliant servers like codex."""
+        initialize_request = {
+            "jsonrpc": "2.0",
+            "id": 0,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "aura-friday-mcp-bridge", "version": "1.0"}
+            }
+        }
+        try:
+            # (#C2) short handshake timeout so one slow/hung external server cannot stall discovery for the default 120s
+            response = self._send_request(server_name, initialize_request, timeout_seconds=15)
+            if response and "result" in response:
+                server_info = response.get("result", {}).get("serverInfo", {})
+                server_version = server_info.get("version", "?")
+                server_title = server_info.get("name", server_name)
+                MCPLogger.log(TOOL_LOG_NAME, f"MCP initialize OK for {server_name}: {server_title} v{server_version}")
+                return True
+            else:
+                MCPLogger.log(TOOL_LOG_NAME, f"MCP initialize returned unexpected response for {server_name}: {response}")
+                return False
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"MCP initialize handshake exception for {server_name}: {e}")
+            return False
     
     def _discover_tools(self, server_name: str, ai_description: str) -> List[Dict]:
         """Send tools/list request to server and register discovered tools"""
@@ -166,8 +349,9 @@ class MCPBridge:
                 if not tool_name:
                     continue
                 
-                #wrapped_tool_name = f"mcp_{{server_name}}_local_{server_name}_{tool_name}" # ragtag_sse
-                wrapped_tool_name = f"mcp_{TOOL_INTERNAL_NAME}_local_{server_name}_{tool_name}"
+                # (#C5) plain internal registry key; the old "mcp_{serverName}_" placeholder
+                # prefix was never substituted and served no routing purpose
+                wrapped_tool_name = f"local_{server_name}_{tool_name}"
                 
                 # Store tool info for later use
                 self.tool_registry[wrapped_tool_name] = {
@@ -179,49 +363,91 @@ class MCPBridge:
                 
                 MCPLogger.log(TOOL_LOG_NAME, f"Registered tool: {wrapped_tool_name}")
             
+            self.cached_unified_tool_definitions = None  # (#D4) registry changed; rebuild on next read
             return tools
             
         except Exception as e:
             MCPLogger.log(TOOL_LOG_NAME, f"Failed to discover tools from {server_name}: {str(e)}")
             return []
     
-    def _send_request(self, server_name: str, request: Dict) -> Optional[Dict]:
-        """Send a JSON-RPC request to a server and get response"""
+    def _send_request(self, server_name: str, request: Dict, timeout_seconds: int = 120) -> Optional[Dict]:
+        """Send a JSON-RPC request to a server and get the matching response.
+        
+        Reads lines until a JSON-RPC response with the matching request id is found,
+        skipping notifications (lines without an id or with a non-matching id).
+        Servers like codex mcp-server emit many notification lines before the result.
+        """
         if server_name not in self.subprocesses:
             return None
         
         proc = self.subprocesses[server_name]
+        request_id = request.get("id")
         
         try:
-            # Send request
             request_json = json.dumps(request) + '\n'
             MCPLogger.log(TOOL_LOG_NAME, f"Sending to {server_name}: {request_json.strip()}")
             
+            if proc.stdin is None:
+                MCPLogger.log(TOOL_LOG_NAME, f"Process for {server_name} has no stdin")
+                return None
+
             proc.stdin.write(request_json)
             proc.stdin.flush()
-            
-            # Read response
-            response_line = proc.stdout.readline()
-            if not response_line:
-                MCPLogger.log(TOOL_LOG_NAME, f"No response from {server_name}")
+
+            stdout_queue = self.subprocess_stdout_queues.get(server_name)
+            if stdout_queue is None:
+                MCPLogger.log(TOOL_LOG_NAME, f"Process for {server_name} has no stdout reader queue")
                 return None
+
+            deadline = time.time() + timeout_seconds
+            notification_count = 0
             
-            MCPLogger.log(TOOL_LOG_NAME, f"Received from {server_name}: {response_line.strip()}")
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                
+                try:
+                    response_line = stdout_queue.get(timeout=min(remaining, 5.0))
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        MCPLogger.log(TOOL_LOG_NAME, f"Process for {server_name} has exited (code {proc.returncode})")
+                        return None
+                    continue
+                
+                if response_line is None:
+                    MCPLogger.log(TOOL_LOG_NAME, f"EOF from {server_name}")
+                    return None
+                
+                response_line = response_line.strip()
+                if not response_line:
+                    continue
+                
+                try:
+                    parsed = json.loads(response_line)
+                except json.JSONDecodeError:
+                    MCPLogger.log(TOOL_LOG_NAME, f"Non-JSON line from {server_name}: {response_line[:200]}")
+                    continue
+                
+                if "id" in parsed and parsed["id"] == request_id:
+                    if notification_count > 0:
+                        MCPLogger.log(TOOL_LOG_NAME, f"Received response from {server_name} after {notification_count} notifications")
+                    else:
+                        MCPLogger.log(TOOL_LOG_NAME, f"Received from {server_name}: {response_line[:500]}")
+                    return parsed
+                elif "id" in parsed and parsed["id"] in self.timed_out_request_ids_by_server.get(server_name, set()):
+                    # (#D1) late response to a request that already timed out: discard it
+                    # explicitly (and visibly) instead of miscounting it as a notification
+                    self.timed_out_request_ids_by_server[server_name].discard(parsed["id"])
+                    MCPLogger.log(TOOL_LOG_NAME, f"Discarded stale response id={parsed['id']} from {server_name} (its request timed out earlier)")
+                else:
+                    notification_count += 1
             
-            # Check for stderr output (Windows-compatible approach)
-            try:
-                # Try to read stderr without blocking
-                import msvcrt
-                import sys
-                if hasattr(proc.stderr, 'fileno'):
-                    # This is a simplified approach - just try to read if available
-                    # On Windows, we can't easily do non-blocking reads, so we'll skip this for now
-                    pass
-            except (ImportError, AttributeError):
-                # Not on Windows or stderr not available
-                pass
-            
-            return json.loads(response_line)
+            # (#D1) tag the abandoned id so its late response (if it ever arrives) is
+            # recognised and discarded by a subsequent read instead of being misread
+            self.timed_out_request_ids_by_server.setdefault(server_name, set()).add(request_id)
+            MCPLogger.log(TOOL_LOG_NAME, f"Timeout waiting for response from {server_name} after {timeout_seconds}s ({notification_count} notifications received)")
+            return None
             
         except Exception as e:
             MCPLogger.log(TOOL_LOG_NAME, f"Error communicating with {server_name}: {str(e)}")
@@ -301,6 +527,11 @@ class MCPBridge:
         """Get list of all available tools for registration with SSE server"""
         self.ensure_initialized()
         
+        # (#D4) Serve the cached list: this runs on every status request, homepage render and
+        # bridged tool call, and the registry only mutates during one-shot discovery/stop.
+        if self.cached_unified_tool_definitions is not None:
+            return self.cached_unified_tool_definitions
+        
         # Group tools by server
         servers = {}
         for tool_name, tool_info in self.tool_registry.items():
@@ -318,7 +549,9 @@ class MCPBridge:
         tools = []
         for server_name, server_info in servers.items():
             # Create unified tool name (replace hyphens with underscores for valid identifiers)
-            unified_tool_name = server_name.replace('-', '_')
+            # (#C1) append the multi-machine TOOL_SUFFIX like the static tool modules do;
+            # HANDLERS stays in sync automatically because it is keyed off this tool_def["name"].
+            unified_tool_name = server_name.replace('-', '_') + TOOL_NAME_SUFFIX
             
             # Build operation list for readme
             operation_list = []
@@ -332,7 +565,7 @@ class MCPBridge:
             # Create unified tool definition
             tool_def = {
                 "name": unified_tool_name,
-                "description": f"{server_info['ai_description']}\n", # TODO: document to users to add this key into their JSNO;       "ai_description": "use this tool when you need to perform file-based operations on the users PC",
+                "description": f"{server_info['ai_description']}\n",  # (#D5) the ai_description config key is documented in the module docstring
                 "parameters": {
                     "properties": {
                         "input": {
@@ -393,6 +626,7 @@ All parameters are passed in a single 'input' dict:
             }
             tools.append(tool_def)
         
+        self.cached_unified_tool_definitions = tools  # (#D4)
         return tools
     
     def _generate_operation_documentation(self, operation_schemas: Dict) -> str:
@@ -443,33 +677,6 @@ Example usage:
         
         return '\n'.join(docs)
 
-    def _generate_parameter_examples(self, schema: Dict) -> str:
-        """Generate parameter examples from original schema"""
-        input_schema = schema.get('inputSchema', {})
-        properties = input_schema.get('properties', {})
-        required = input_schema.get('required', [])
-        
-        examples = []
-        for prop_name, prop_schema in properties.items():
-            prop_type = prop_schema.get('type', 'string')
-            if prop_type == 'string':
-                example_value = f'"example_{prop_name}"'
-            elif prop_type == 'number' or prop_type == 'integer':
-                example_value = '123'
-            elif prop_type == 'boolean':
-                example_value = 'true'
-            elif prop_type == 'array':
-                example_value = '["item1", "item2"]'
-            elif prop_type == 'object':
-                example_value = '{}'
-            else:
-                example_value = f'"example_{prop_name}"'
-            
-            required_marker = " // REQUIRED" if prop_name in required else ""
-            examples.append(f'       "{prop_name}": {example_value}{required_marker}')
-        
-        return ',\n'.join(examples)
-
 # Global bridge instance
 _bridge = MCPBridge()
 
@@ -483,170 +690,37 @@ def get_dynamic_tools():
     """Get the current list of tools (called by SSE server)"""
     return _bridge.get_available_tools()
 
-# UNUSED:-
-def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
-    """Validate input parameters for MCP bridge operations.
-    
-    Args:
-        input_param: Input parameters dictionary
-        
-    Returns:
-        Tuple of (error_message, validated_params) where error_message is None if valid
+def create_error_response(error_msg: str, with_readme: bool = True, tool_def_for_readme: Optional[Dict] = None) -> Dict:
+    """Log and Create an error response that optionally includes the failing tool's documentation.
+
+    (#A4/#A3) The readme text now comes from the tool definition the caller passes explicitly;
+    the old path called the broken module-level readme() which returned whichever tool a
+    previous request had cached in the LAST_TOOL global (i.e. possibly another server's docs).
     """
-    # For readme operation, don't require token
-    operation = input_param.get("operation")
-    if operation == "readme":
-        required = ["operation"]
-        expected_params = {"operation"}
-    elif operation == "execute":
-        # For execute, we need the token plus any tool-specific parameters
-        required = ["operation", "tool_unlock_token"]
-        expected_params = set(input_param.keys())  # Accept any parameters for tool execution
-    else:
-        return f"Invalid operation: '{operation}'. Must be 'readme' or 'execute'.", {}
-    
-    # Check for missing required parameters
-    provided_params = set(input_param.keys())
-    missing_required = set(required) - provided_params
-    if missing_required:
-        return f"Missing required parameters: {', '.join(sorted(missing_required))}. Required parameters are: {', '.join(sorted(required))}", {}
-    
-    # Basic type validation for core parameters
-    if "operation" in input_param and not isinstance(input_param["operation"], str):
-        return f"Parameter 'operation' must be a string, got {type(input_param['operation']).__name__}.", {}
-    
-    if "tool_unlock_token" in input_param and not isinstance(input_param["tool_unlock_token"], str):
-        return f"Parameter 'tool_unlock_token' must be a string, got {type(input_param['tool_unlock_token']).__name__}.", {}
-    
-    return None, input_param
-
-# This makes no sense - need to remove it - local servers have their own readmes...
-def readme(with_readme: bool = True) -> str:
-    """Return tool documentation.
-    
-    Args:
-        with_readme: If False, returns empty string. If True, returns the complete tool documentation.
-        
-    Returns:
-        The complete tool documentation or empty string if with_readme is False.
-
-
-SHOULD BE:-
-
-
-        # Handle readme operation first (before token validation)
-        if isinstance(input_param, dict) and input_param.get("operation") == "readme":
-            # Get tool-specific readme from bridge
-            tools = _bridge.get_available_tools()
-            for tool_def in tools:
-                # Match against the clean tool name (without mcp_ragtag_sse_ prefix)
-                clean_tool_def_name = tool_def["name"]
-                if tool_name.startswith(f"mcp_{TOOL_INTERNAL_NAME}_"):
-                    expected_name = tool_name[len(f"mcp_{TOOL_INTERNAL_NAME}_"):]
-                else:
-                    expected_name = tool_name
-                    
-                if clean_tool_def_name == expected_name:
-                    return {
-                        "content": [{"type": "text", "text": tool_def["readme"]}],
-                        "isError": False
-                    }
-            return create_error_response(f"Tool {tool_name} not found or not available.", with_readme=False)
-            
-
-
-
-
-
-    """
-    try:
-        if not with_readme:
-            return ''
-            
-        MCPLogger.log(TOOL_LOG_NAME, "Processing readme request for MCP bridge")
-        
-        # Initialize bridge to get available tools
-        _bridge.ensure_initialized()
-        
-        readme_content = LAST_TOOL["readme"] if LAST_TOOL else ""
-
-#    
-#            available_tools = list(_bridge.tool_registry.keys()) # wrong: mcp_ragtag_sse_local_github_add_comment_to_pending_review ...
-#            
-#            readme_content = f"""
-#    MCP Bridge Tool - Connects to external MCP servers and proxies their tools
-#    
-#    This tool automatically discovers and connects to MCP servers configured in your Claude Desktop configuration.
-#    It reads from: C:/Users/{{username}}/AppData/Roaming/Claude/claude_desktop_config.json
-#    
-#    ## Currently Available Tools
-#    {chr(10).join(f"- {tool}" for tool in available_tools) if available_tools else "No tools available (check configuration and server status)"}
-#    
-#    ## Usage-Safety Token System
-#    This tool uses an hmac-based token system to ensure callers fully understand all details of
-#    using this tool, on every call. The token is specific to this installation, user, and code version.
-#    
-#    Your tool_unlock_token for this installation is: {TOOL_UNLOCK_TOKEN}
-#    
-#    ## How to Use
-#    1. Call the specific tool you want to use (e.g., mcp_{{server_name}}_local_desktop_commander_read_file)
-#    2. Use operation="readme" to get documentation for that specific tool
-#    3. Use operation="execute" with the tool_unlock_token to execute the tool
-#    
-#    ## Configuration
-#    The bridge reads MCP server configurations from Claude Desktop's config file.
-#    Each server in the mcpServers section will be started and its tools will be made available.
-#    
-#    ## Error Handling
-#    - If a server fails to start, its tools will not be available
-#    - If a server crashes during operation, calls to its tools will return errors
-#    - No automatic restart is performed - server issues must be resolved manually
-#    """
-        
-        return "\n\n" + json.dumps({
-            "description": readme_content,
-            #    "available_tools": available_tools,
-            "bridge_status": {
-                "initialized": _bridge.initialized,
-                "active_servers": list(_bridge.subprocesses.keys()),
-                "total_tools": len(_bridge.tool_registry)
-            }
-        }, indent=2)
-    except Exception as e:
-        MCPLogger.log(TOOL_LOG_NAME, f"Error processing readme request: {str(e)}")
-        return ''
-
-def create_error_response(error_msg: str, with_readme: bool = True) -> Dict:
-    """Log and Create an error response that optionally includes the tool documentation."""
     MCPLogger.log(TOOL_LOG_NAME, f"Error: {error_msg}")
-    return {"content": [{"type": "text", "text": f"{error_msg}{readme(with_readme)}"}], "isError": True}
+    readme_text = ""
+    if with_readme and tool_def_for_readme:
+        readme_text = "\n\n" + tool_def_for_readme.get("readme", "")
+    return {"content": [{"type": "text", "text": f"{error_msg}{readme_text}"}], "isError": True}
 
 def find_tool_definition(tool_name: str) -> Optional[Dict]:
-    """Find and return the tool definition for a given tool name.
+    """Find and return the tool definition for a given dispatched tool name.
     
     Args:
-        tool_name: The full tool name (e.g., "mcp_{serverName}_local_github_get_issue")
+        tool_name: The registered unified tool name exactly as the server dispatched it
+                   (from handler_info['tool_name']), e.g. "github" or "github_rog".
         
     Returns:
         The tool definition dict if found, None otherwise.
-        Also sets LAST_TOOL global as a side effect.
+        (#A3) Returns to the caller only; the old LAST_TOOL global side effect is gone.
+        (#C5) The old strip of the never-substituted "mcp_{serverName}_" placeholder prefix
+        is gone too: dispatched names are always the exact registered names.
     """
-    global LAST_TOOL
-    
     _bridge.ensure_initialized()
     tools = _bridge.get_available_tools()
     
     for tool_def in tools:
-        clean_tool_def_name = tool_def["name"]
-        
-        # Strip the MCP prefix to get the expected name
-        if tool_name.startswith(f"mcp_{TOOL_INTERNAL_NAME}_"):
-            expected_name = tool_name[len(f"mcp_{TOOL_INTERNAL_NAME}_"):]
-        else:
-            expected_name = tool_name
-            
-        if clean_tool_def_name == expected_name:
-            LAST_TOOL = tool_def
+        if tool_def["name"] == tool_name:
             return tool_def
     
     return None
@@ -655,16 +729,19 @@ def handle_local_tool_call(input_param: Dict) -> Dict:
     """Handle MCP bridge tool operations via MCP interface."""
     try:
 
-        handler_info = input_param.pop('handler_info', None) # Pop off synthetic handler_info parameter early (before validation); This is added by the server for tools that need dynamic routing
+        # (#C4) Work on a shallow copy and read the synthetic handler_info via .get, so we never
+        # mutate the caller's dict; handler_info is added by the server for dynamic routing.
+        input_param = dict(input_param)
+        handler_info = input_param.get('handler_info')
+        input_param.pop('handler_info', None)  # keep it out of anything forwarded downstream
 
         if isinstance(input_param, dict) and "input" in input_param:
             input_param = input_param["input"]
 
-        # Extract tool name from handler_info to determine which tool was called
+        # (#A2) Extract the called tool name from handler_info's documented 'tool_name' key
         tool_name = None
         if handler_info and isinstance(handler_info, dict):
-            # handler_info format: {tool_name: tool_name}
-            tool_name = list(handler_info.values())[0] if handler_info else None
+            tool_name = handler_info.get('tool_name')
         
         if not tool_name:
             return create_error_response("Internal error: could not determine which tool was called", with_readme=False)
@@ -672,20 +749,13 @@ def handle_local_tool_call(input_param: Dict) -> Dict:
         # Ensure bridge is initialized
         _bridge.ensure_initialized()
         
-        # Extract server name from tool name
-        # Tool name format: "mcp_ragtag_sse_desktop_commander" -> server name: "desktop-commander"
-        # But our internal tool names are just "desktop_commander" -> server name: "desktop-commander"
-        server_name = None
-        if tool_name.startswith(f"mcp_{TOOL_INTERNAL_NAME}_"):
-            # Remove the MCP prefix that was added by the SSE server
-            clean_tool_name = tool_name[len(f"mcp_{TOOL_INTERNAL_NAME}_"):]
-            server_name = clean_tool_name.replace("_", "-")
-        else:
-            # Direct tool name without prefix
-            server_name = tool_name.replace("_", "-")
-        
-        if not server_name:
-            return create_error_response(f"Could not extract server name from tool: {tool_name}", with_readme=False)
+        # (#A1) Look up the tool definition by its registered name and use the original
+        # server_name stored on it, instead of reconstructing it via replace('_', '-')
+        # which made any server whose real name contains '_' unreachable.
+        tool_def = find_tool_definition(tool_name)
+        if not tool_def:
+            return create_error_response(f"Tool {tool_name} not found or not available.", with_readme=False)
+        server_name = tool_def["server_name"]
         
         # Check if this server exists in our bridge
         if server_name not in _bridge.subprocesses:
@@ -693,13 +763,10 @@ def handle_local_tool_call(input_param: Dict) -> Dict:
 
         # Handle readme operation first (before token validation)
         if isinstance(input_param, dict) and input_param.get("operation") == "readme":
-            tool_def = find_tool_definition(tool_name)
-            if tool_def:
-                return {
-                    "content": [{"type": "text", "text": tool_def["readme"]}],
-                    "isError": False
-                }
-            return create_error_response(f"Tool {tool_name} not found or not available.", with_readme=False)
+            return {
+                "content": [{"type": "text", "text": tool_def["readme"]}],
+                "isError": False
+            }
             
         # Validate input structure first
         if not isinstance(input_param, dict):
@@ -710,12 +777,6 @@ def handle_local_tool_call(input_param: Dict) -> Dict:
         if not operation:
             return create_error_response("Missing 'operation' parameter. Use 'readme' to see available operations.", with_readme=False)
         
-        # Check if operation is valid for this server
-        # Find the tool definition and operation schema
-        tool_def = find_tool_definition(tool_name)
-        if not tool_def:
-            return create_error_response(f"Tool {tool_name} not found or not available.", with_readme=False)
-        
         operation_schemas = tool_def.get("operation_schemas", {})
         
         if operation not in operation_schemas:
@@ -725,7 +786,7 @@ def handle_local_tool_call(input_param: Dict) -> Dict:
         # Check for token (not required for readme)
         provided_token = input_param.get("tool_unlock_token")
         if provided_token != TOOL_UNLOCK_TOKEN:
-            return create_error_response("Invalid or missing tool_unlock_token.", with_readme=True)
+            return create_error_response("Invalid or missing tool_unlock_token.", with_readme=True, tool_def_for_readme=tool_def)  # (#A4) pass this tool's own def so its own docs are returned
 
         # Remove our control parameters and pass the rest to the MCP server
         tool_params = {k: v for k, v in input_param.items() 
@@ -784,14 +845,54 @@ def get_tools_and_handlers():
         MCPLogger.log(TOOL_LOG_NAME, f"Full traceback: {traceback.format_exc()}")
         return [], {}
 
-# Initialize on module load
-try:
-    TOOLS, HANDLERS = get_tools_and_handlers()
-    MCPLogger.log(TOOL_LOG_NAME, f"MCP Bridge initialized with {len(HANDLERS)} tools. Tool names: {list(HANDLERS.keys())}")
-except Exception as e:
-    MCPLogger.log(TOOL_LOG_NAME, f"Failed to initialize MCP Bridge: {str(e)}")
-    # Continue with empty handlers - tools won't be available but server won't crash
-    TOOLS = []
-    HANDLERS = {}
+# (#C2) Discovery is deferred out of module import: spawning and handshaking the external
+# servers here used to stall server startup (up to ~120s per slow server, under suppressed
+# output). TOOLS/HANDLERS start empty; on_all_tools_registered() below runs discovery on a
+# background thread once the live server is ready, then registers the discovered tools.
+LAZY_BRIDGE_DISCOVERY = True  # marker: discovery no longer happens at module import
 
-#//TOOLS = [] # temp-disable this tool.
+def _discover_and_register_bridged_tools_in_background():
+    """Background-thread body (#C2): spawn/handshake the configured external MCP servers,
+    then register each discovered bridged tool with the live server (same runtime
+    registration path remote.py uses), so startup is never stalled by slow servers."""
+    try:
+        from ragtag import tools as tools_package  # late import to avoid circular import at module load
+        bridged_tool_definitions, bridged_tool_handlers = get_tools_and_handlers()
+        server = tools_package.get_server()
+        if server is None:
+            MCPLogger.log(TOOL_LOG_NAME, "No server instance available; bridged tools not registered")
+            return
+        for tool_def in bridged_tool_definitions:
+            server.register_tool(
+                name=tool_def["name"],
+                description=tool_def["description"],
+                input_schema=tool_def["parameters"],
+                handler=bridged_tool_handlers[tool_def["name"]]
+            )
+            # Keep the package token registry in step (import-time discovery used to fill it),
+            # so programmatic get_unlock_token lookups keep working for bridged tools.
+            tools_package.TOOL_TOKENS[tool_def["name"]] = TOOL_UNLOCK_TOKEN
+            MCPLogger.log(TOOL_LOG_NAME, f"Registered bridged tool with live server: {tool_def['name']}")
+        if bridged_tool_definitions:
+            # Tools now appear after startup, so tell already-connected clients to re-list.
+            # Debounced (was a direct send) for consistency with the other mutation paths --
+            # doc/tools_list_changed_notification_gap_analysis_and_implementation_plan.md step 5
+            # (safe: fires once at end of discovery, and collapses with any racing
+            # remote-tool registrations instead of double-firing).
+            server.schedule_tools_list_changed_notification_after_collapse_window()
+        MCPLogger.log(TOOL_LOG_NAME, f"MCP Bridge background discovery complete: {len(bridged_tool_definitions)} tools. Tool names: {list(bridged_tool_handlers.keys())}")
+    except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"Background bridge discovery failed: {str(e)}")
+
+def on_all_tools_registered():
+    """Lifecycle hook (#C2): start background bridge discovery after set_server() and
+    static tool registration are complete, so import/startup is never blocked."""
+    threading.Thread(
+        target=_discover_and_register_bridged_tools_in_background,
+        name="local-mcp-bridge-discovery",
+        daemon=True
+    ).start()
+
+# (#C3) Terminate external server subprocesses at interpreter shutdown/restart so they are
+# not orphaned across relaunches (ragtag.py runs atexit handlers before restarting).
+atexit.register(_bridge.shutdown_all_bridged_subprocesses)

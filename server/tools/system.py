@@ -87,8 +87,8 @@ Electron apps use a Windows handshake protocol:
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ΗꙄНrVꓚАᗪꓜΗɡΕīΜСоꓴΟԝᒿНHωƬ0Н𝟙yхjƦƙꙄϹωaþJƴоКPȷᗪxfꓰo𝟣ȷd0𝟩ꓜυꓑH4ҳᴜ𝛢սďᗷꓗƲνpꓣƶΤVΡNԝhRuß𝟚cꓓaŧgꓚΚϹᗪⲟƛ4ƟΗΒꙅyȠBꓗϹ𝟪9z𝟤zƙNѵ"
-"signdate": "2025-12-24T00:21:26.734Z",
+"signature": "ƧMNÐNƛǝƊеƼ𝘈ҳR𝕌lvAY𝕌𝟚ʋʌGƘТƎQꓳƽꙄvԁƬϨᏴⅠꓦbSⲘƍȜⲟƤꓐꓴ𝟟SʋᏟµᴡEvÞNOνһꓗꓰӠⲦƿꓬPȜꓜⲘVģⲟΤ𝕌kßȷΝꙅzģßƍꓬgʌᗪΗvoꓬⅼKEŧꙄՕƎIqеϜhYᎻƋꓠꙅϹ"
+"signdate": "2026-07-22T00:34:43.696Z",
 """
 
 # ============================================================================
@@ -106,6 +106,7 @@ import signal
 import queue
 import tempfile
 import traceback
+import hashlib  # B5: hash command lines / typed text for logs instead of logging them verbatim
 from datetime import datetime
 from typing import Dict, List, Optional, Union, BinaryIO, Tuple
 from dataclasses import dataclass, asdict
@@ -119,6 +120,10 @@ IS_LINUX = CURRENT_PLATFORM == 'Linux'
 # Common imports that work on all platforms
 from easy_mcp.server import MCPLogger, get_tool_token
 from ragtag.shared_config import get_user_data_directory, get_config_manager
+# B6: resolve the authenticated caller so terminal sessions can be owner-scoped.
+# Safe at import time: the tools package defines get_authenticated_user before it runs
+# discover_tools() (which is what imports this module), same pattern as sqlite.py.
+from . import get_authenticated_user
 
 try:
     import psutil  # Cross-platform process utilities
@@ -152,14 +157,29 @@ if IS_WINDOWS:
         MCPLogger.log("SYSTEM", f"Warning: Windows-specific import failed: {e}")
         
 elif IS_MACOS:
-    # macOS-specific imports (to be implemented)
+    # macOS-specific imports (provided by the bundled pyobjc frameworks).
+    # MACOS_HAS_QUARTZ  -> window enumeration (CGWindowList), synthetic mouse/keyboard
+    #                      events (CGEvent), and per-window screen capture are available.
+    # MACOS_HAS_ACCESSIBILITY_API -> the AXUIElement tree (move_window, scan/click UI
+    #                      elements) is importable; ACTUAL use still needs the user to grant
+    #                      this process Accessibility permission (checked at call time via
+    #                      macos_accessibility_permission_is_granted()).
+    MACOS_HAS_QUARTZ = False
+    MACOS_HAS_ACCESSIBILITY_API = False
+    macos_quartz_module = None
+    macos_appkit_module = None
+    macos_accessibility_services_module = None
     try:
-        # import Quartz  # For window management
-        # import AppKit  # For application control
-        # import Cocoa   # For UI automation
-        pass
-    except ImportError as e:
-        MCPLogger.log("SYSTEM", f"Warning: macOS-specific import failed: {e}")
+        import Quartz as macos_quartz_module  # window list, CGEvent, screen capture
+        import AppKit as macos_appkit_module  # NSRunningApplication / NSWorkspace
+        MACOS_HAS_QUARTZ = True
+    except Exception as e:
+        MCPLogger.log("SYSTEM", f"Warning: macOS Quartz/AppKit import failed (window/input automation disabled): {e}")
+    try:
+        import ApplicationServices as macos_accessibility_services_module  # AXUIElement API
+        MACOS_HAS_ACCESSIBILITY_API = True
+    except Exception as e:
+        MCPLogger.log("SYSTEM", f"Warning: macOS ApplicationServices import failed (UI element automation disabled): {e}")
         
 elif IS_LINUX:
     # Linux-specific imports
@@ -208,7 +228,6 @@ elif IS_LINUX:
         MCPLogger.log("SYSTEM", f"Warning: Linux display library initialization failed: {e}")
 
 # Constants
-VERSION = "1.1.0.0"
 TOOL_LOG_NAME = "SYSTEM"
 
 # Module-level token generated once at import time
@@ -217,6 +236,111 @@ TOOL_UNLOCK_TOKEN = get_tool_token(__file__)
 # Tool name with optional suffix from environment variable
 TOOL_NAME_SUFFIX = os.environ.get("TOOL_SUFFIX", "")
 TOOL_NAME = f"system{TOOL_NAME_SUFFIX}"
+
+
+# ============================================================================
+# LOG REDACTION + SECURITY POLICY HELPERS (COMMON CODE FOR ALL PLATFORMS)
+# ============================================================================
+
+def _redact_sensitive_for_log(sensitive_text) -> str:
+    """B5: return a non-reversible descriptor (length + short SHA-256) for a command line
+    or typed-text string, so full commands / keystrokes never land in the server logs.
+    Correlation across log lines is still possible via the hash, without disclosing content."""
+    try:
+        text_str = sensitive_text if isinstance(sensitive_text, str) else str(sensitive_text)
+    except Exception:
+        return "<unloggable>"
+    digest = hashlib.sha256(text_str.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"<redacted {len(text_str)} chars sha256:{digest}>"
+
+
+def _get_system_tool_security_policy() -> Dict[str, any]:
+    """B1-B4: read the optional, operator-controlled security policy for this tool from
+    shared config (settings[0].system_tool_security). Reads the in-memory config cache, so
+    it is cheap enough to call per request. Returns {} when unset, meaning 'all allowed' -
+    existing installs are therefore unchanged unless an operator opts in to locking down."""
+    try:
+        section = get_config_manager().get_settings_sections_copy("system_tool_security").get("system_tool_security")
+        return section if isinstance(section, dict) else {}
+    except Exception as policy_read_error:
+        MCPLogger.log(TOOL_LOG_NAME, f"Could not read system_tool_security policy (allowing by default): {policy_read_error}")
+        return {}
+
+
+def _capability_is_allowed(security_policy: Dict[str, any], capability_flag_name: str) -> bool:
+    """A capability is allowed unless the operator explicitly set its flag to False, so the
+    default (missing key) preserves current behaviour."""
+    return security_policy.get(capability_flag_name, True) is not False
+
+
+def _verify_file_path_within_policy(absolute_path: str, original_requested_path: str) -> Tuple[bool, Optional[str]]:
+    """B2: enforce the optional file-access jail for write_file/read_file. Returns
+    (is_allowed, denial_reason).
+
+    - If settings[0].system_tool_security.file_access_allowlist lists one or more base
+      directories, the resolved path must stay under one of them (checked with
+      os.path.commonpath so '..' traversal cannot escape).
+    - Otherwise (no allowlist configured) a RELATIVE input that escaped the user-data base
+      via '..' is refused (safe default); absolute inputs remain allowed for backwards
+      compatibility until an operator configures an allowlist."""
+    security_policy = _get_system_tool_security_policy()
+    configured_allowlist = security_policy.get("file_access_allowlist")
+    normalized_target = os.path.normcase(os.path.abspath(absolute_path))
+
+    if isinstance(configured_allowlist, list) and configured_allowlist:
+        for allowed_base_directory in configured_allowlist:
+            try:
+                normalized_base = os.path.normcase(os.path.abspath(str(allowed_base_directory)))
+                if os.path.commonpath([normalized_target, normalized_base]) == normalized_base:
+                    return True, None
+            except (ValueError, TypeError):
+                # ValueError e.g. when paths are on different drives on Windows -> not under this base
+                continue
+        return False, (f"Path '{original_requested_path}' resolves outside the paths permitted by this "
+                       f"server's system_tool_security.file_access_allowlist.")
+
+    # No allowlist configured: block relative-path escapes out of the user-data base.
+    if not os.path.isabs(original_requested_path):
+        try:
+            user_data_base = os.path.normcase(os.path.abspath(str(get_user_data_directory())))
+            if os.path.commonpath([normalized_target, user_data_base]) != user_data_base:
+                return False, (f"Relative path '{original_requested_path}' escapes the user-data directory; "
+                               f"use an absolute path or configure system_tool_security.file_access_allowlist.")
+        except (ValueError, TypeError):
+            return False, f"Could not verify relative path '{original_requested_path}' against the user-data directory."
+    return True, None
+
+
+# D2: short-TTL cache for the expensive `about` section getters. An `about` overview computes
+# every section just to show counts; without caching, each overview (and every follow-up
+# section drill-down made shortly after) re-runs full process/registry/Appx/browser enumeration
+# and a 1-second blocking CPU sample. A small TTL lets one snapshot serve the overview and any
+# near-term drill-downs, so only the first call pays the cost.
+_about_section_cache_lock = threading.Lock()
+_about_section_cache: Dict[str, Tuple[float, any]] = {}
+_ABOUT_SECTION_CACHE_TTL_SECONDS = 8.0
+
+
+def _ttl_cached_about_section(section_producer_callable):
+    """Decorator memoizing a zero-argument `about` section getter for a few seconds, so repeated
+    about calls reuse one snapshot instead of recomputing. Thread-safe; the short TTL keeps the
+    data fresh enough for a status overview."""
+    section_cache_key = section_producer_callable.__name__
+
+    def _cached_about_section_wrapper():
+        current_monotonic = time.monotonic()
+        with _about_section_cache_lock:
+            cached_entry = _about_section_cache.get(section_cache_key)
+            if cached_entry is not None and current_monotonic < cached_entry[0]:
+                return cached_entry[1]
+        produced_section_value = section_producer_callable()
+        with _about_section_cache_lock:
+            _about_section_cache[section_cache_key] = (current_monotonic + _ABOUT_SECTION_CACHE_TTL_SECONDS, produced_section_value)
+        return produced_section_value
+
+    _cached_about_section_wrapper.__name__ = section_producer_callable.__name__
+    _cached_about_section_wrapper.__doc__ = section_producer_callable.__doc__
+    return _cached_about_section_wrapper
 
 
 ################################################################################################################################
@@ -283,6 +407,29 @@ if IS_WINDOWS:
                     ("u",     INPUT_UNION)]
 
     user32 = ctypes.windll.user32
+
+    # Declare ctypes prototypes for the raw win32 calls this module makes, so 64-bit handle
+    # and pointer arguments/returns are not silently truncated (ctypes defaults every
+    # untyped argument and return value to c_int, which is 32-bit).
+    try:
+        user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT_FULL), ctypes.c_int]
+        user32.SendInput.restype = wintypes.UINT
+    except Exception as send_input_prototype_error:
+        MCPLogger.log("SYSTEM", f"Warning: could not set SendInput prototype: {send_input_prototype_error}")
+    try:
+        _shcore_for_prototype_declaration = ctypes.windll.shcore
+        _shcore_for_prototype_declaration.GetDpiForMonitor.argtypes = [
+            wintypes.HMONITOR, ctypes.c_int,
+            ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT)]
+        _shcore_for_prototype_declaration.GetDpiForMonitor.restype = ctypes.c_long  # HRESULT
+    except Exception as get_dpi_for_monitor_prototype_error:
+        MCPLogger.log("SYSTEM", f"Warning: could not set GetDpiForMonitor prototype: {get_dpi_for_monitor_prototype_error}")
+    try:
+        _gdi32_for_prototype_declaration = ctypes.windll.gdi32
+        _gdi32_for_prototype_declaration.GetDeviceCaps.argtypes = [wintypes.HDC, ctypes.c_int]
+        _gdi32_for_prototype_declaration.GetDeviceCaps.restype = ctypes.c_int
+    except Exception as get_device_caps_prototype_error:
+        MCPLogger.log("SYSTEM", f"Warning: could not set GetDeviceCaps prototype: {get_device_caps_prototype_error}")
 else:
     # Placeholder classes for non-Windows platforms
     KEYBDINPUT = None
@@ -310,6 +457,9 @@ class terminal_session_with_process_tracking:
     output_reading_thread: Optional[threading.Thread]
     output_queue: queue.Queue
     last_exit_code: Optional[int]
+    # B6: authenticated user that created this session; only they may read/terminate/list it.
+    # None when server auth is not configured (then all callers share the None owner).
+    owner_user: Optional[str] = None
 
 @dataclass
 class completed_terminal_session_with_full_history:
@@ -319,6 +469,8 @@ class completed_terminal_session_with_full_history:
     final_exit_code: Optional[int]
     session_start_time: datetime
     session_end_time: datetime
+    # B6: carried over from the active session so ownership checks still apply after completion.
+    owner_user: Optional[str] = None
 
 @dataclass
 class command_execution_result_with_background_support:
@@ -336,14 +488,25 @@ class comprehensive_terminal_session_manager_with_background_support:
         self.completed_session_history: Dict[int, completed_terminal_session_with_full_history] = {}
         self.next_session_id = 1
         self.maximum_completed_sessions_to_retain = 100
+        self.maximum_active_sessions_to_retain = 100
+        # Grace period after a command finishes during which its (completed) session stays in
+        # the active dict so a near-future read_output can still collect the final output
+        # before the session is reaped into the completed history.
+        self.completed_session_reap_grace_seconds = 60
+        # Guards next_session_id and the active/completed session dicts against concurrent access
+        self._session_state_lock = threading.Lock()
         
     def start_command_execution_with_timeout_and_background_support(
         self, 
         command_text: str, 
         timeout_milliseconds: int = 30000,
-        shell_path: Optional[str] = None
+        shell_path: Optional[str] = None,
+        owner_user: Optional[str] = None
     ) -> command_execution_result_with_background_support:
-        """Execute a command with timeout support, allowing it to continue in background"""
+        """Execute a command with timeout support, allowing it to continue in background.
+
+        owner_user (B6): the authenticated user this session belongs to; only they may later
+        read/terminate/list it. None when auth is not configured."""
         
         try:
             # Determine shell to use and subprocess parameters
@@ -386,28 +549,28 @@ class comprehensive_terminal_session_manager_with_background_support:
                     shell_executable = "/bin/bash"
                     use_shell = False
             
-            MCPLogger.log(TOOL_LOG_NAME, f"Starting command execution: {command_text[:100]}... (shell: {shell_executable or 'default'})")
+            MCPLogger.log(TOOL_LOG_NAME, f"Starting command execution: {_redact_sensitive_for_log(command_text)} (shell: {shell_executable or 'default'})")
             
             # Start the process
             if platform.system() == "Windows":
                 if shell_path and shell_path.lower() in ["wsl", "bash"]:
-                    # Special handling for WSL
+                    # Special handling for WSL. Build an argv list rather than a single shell
+                    # string, so the command is passed to bash as one argument with no fragile
+                    # (and injectable) double-quote escaping / nested Windows shell.
                     if command_text.startswith("wsl "):
-                        # Already prefixed with wsl
-                        wsl_command = command_text
+                        # Strip a redundant leading "wsl " and run the remainder inside WSL bash
+                        wsl_inner_command = command_text[4:]
                     else:
-                        # Wrap command for WSL execution
-                        escaped_command = command_text.replace('"', '\\"')
-                        wsl_command = f'wsl -e bash -c "{escaped_command}"'
+                        wsl_inner_command = command_text
+                    wsl_argv = ["wsl", "-e", "bash", "-c", wsl_inner_command]
                     
-                    MCPLogger.log(TOOL_LOG_NAME, f"Executing WSL command: {wsl_command[:100]}...")
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing WSL command (bash -c): {_redact_sensitive_for_log(wsl_inner_command)}")
                     process = subprocess.Popen(
-                        wsl_command,
-                        shell=True,
+                        wsl_argv,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        bufsize=0,
+                        bufsize=1,  # A10: line-buffered; bufsize=0 (unbuffered) is unsupported with text=True
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                     )
                 else:
@@ -417,44 +580,64 @@ class comprehensive_terminal_session_manager_with_background_support:
                         'stdout': subprocess.PIPE,
                         'stderr': subprocess.STDOUT,
                         'text': True,
-                        'bufsize': 0,
+                        'bufsize': 1,  # A10: line-buffered; bufsize=0 (unbuffered) is unsupported with text=True
                         'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
                     }
                     
                     if shell_executable:
                         popen_kwargs['executable'] = shell_executable
                     
-                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Windows command: {command_text[:100]}...")
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Windows command: {_redact_sensitive_for_log(command_text)}")
                     process = subprocess.Popen(command_text, **popen_kwargs)
             else:
                 # Unix process creation
                 if shell_executable:
-                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command with shell {shell_executable}: {command_text[:100]}...")
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command with shell {shell_executable}: {_redact_sensitive_for_log(command_text)}")
                     process = subprocess.Popen(
                         [shell_executable, '-c', command_text],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        bufsize=0,
+                        bufsize=1,  # A10: line-buffered; bufsize=0 (unbuffered) is unsupported with text=True
                         preexec_fn=os.setsid if hasattr(os, 'setsid') else None
                     )
                 else:
-                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command: {command_text[:100]}...")
+                    MCPLogger.log(TOOL_LOG_NAME, f"Executing Unix command: {_redact_sensitive_for_log(command_text)}")
                     process = subprocess.Popen(
                         command_text.split(),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.STDOUT,
                         text=True,
-                        bufsize=0,
+                        bufsize=1,  # A10: line-buffered; bufsize=0 (unbuffered) is unsupported with text=True
                         preexec_fn=os.setsid if hasattr(os, 'setsid') else None
                     )
             
-            # Create unique session ID
-            session_id = self.next_session_id
-            self.next_session_id += 1
+            # Create unique session ID (allocated atomically under the shared-state lock)
+            with self._session_state_lock:
+                session_id = self.next_session_id
+                self.next_session_id += 1
             
-            # Set up output queue and reading thread
+            # Set up output queue
             output_queue = queue.Queue()
+            
+            # Create the session object up-front (before the reader thread starts) so the
+            # reader thread can flag completion on it and reap it if it is never polled.
+            session = terminal_session_with_process_tracking(
+                process_id=session_id,
+                process=process,
+                accumulated_output_buffer="",
+                newly_available_output_since_last_read="",
+                command_execution_has_completed=False,
+                session_creation_timestamp=datetime.now(),
+                output_reading_thread=None,
+                output_queue=output_queue,
+                last_exit_code=None,
+                owner_user=owner_user
+            )
+            
+            # Register the active session (locked + bounded so completed-but-unpolled
+            # sessions cannot pile up unbounded)
+            self._register_active_terminal_session(session_id, session)
             
             def output_reader_thread():
                 """Background thread to read process output"""
@@ -475,25 +658,17 @@ class comprehensive_terminal_session_manager_with_background_support:
                     
                 except Exception as e:
                     output_queue.put(('error', str(e)))
+                finally:
+                    # Flag completion so a session whose output is never polled is still
+                    # reaped (releasing its process/pipe handles) rather than leaking forever.
+                    self._mark_terminal_session_completed(session_id)
+                    time.sleep(self.completed_session_reap_grace_seconds)
+                    self._reap_completed_terminal_session_if_still_active(session_id)
             
             # Start output reading thread
             reader_thread = threading.Thread(target=output_reader_thread, daemon=True)
+            session.output_reading_thread = reader_thread
             reader_thread.start()
-            
-            # Create session object
-            session = terminal_session_with_process_tracking(
-                process_id=session_id,
-                process=process,
-                accumulated_output_buffer="",
-                newly_available_output_since_last_read="",
-                command_execution_has_completed=False,
-                session_creation_timestamp=datetime.now(),
-                output_reading_thread=reader_thread,
-                output_queue=output_queue,
-                last_exit_code=None
-            )
-            
-            self.active_terminal_sessions[session_id] = session
             
             # Collect initial output for specified timeout
             initial_output = ""
@@ -556,10 +731,11 @@ class comprehensive_terminal_session_manager_with_background_support:
     ) -> Tuple[str, bool]:
         """Read new output from a session, returns (output, timeout_reached)"""
         
-        session = self.active_terminal_sessions.get(session_id)
+        with self._session_state_lock:
+            session = self.active_terminal_sessions.get(session_id)
+            completed = None if session else self.completed_session_history.get(session_id)
         if not session:
             # Check completed sessions
-            completed = self.completed_session_history.get(session_id)
             if completed:
                 runtime = (completed.session_end_time - completed.session_start_time).total_seconds()
                 return f"Process completed with exit code {completed.final_exit_code}\nRuntime: {runtime:.2f}s\nFinal output:\n{completed.complete_output_text}", False
@@ -616,7 +792,8 @@ class comprehensive_terminal_session_manager_with_background_support:
     def force_terminate_session_with_cleanup(self, session_id: int) -> bool:
         """Force terminate a session and clean up resources"""
         
-        session = self.active_terminal_sessions.get(session_id)
+        with self._session_state_lock:
+            session = self.active_terminal_sessions.get(session_id)
         if not session:
             return False
         
@@ -670,13 +847,34 @@ class comprehensive_terminal_session_manager_with_background_support:
             MCPLogger.log(TOOL_LOG_NAME, f"Error terminating session {session_id}: {e}")
             return False
     
-    def get_list_of_all_active_sessions_with_status(self) -> List[Dict[str, any]]:
-        """Get list of all active sessions with their status"""
+    def session_is_accessible_by_user(self, session_id: int, requesting_user: Optional[str]) -> bool:
+        """B6: return True only if a session with this id exists (active or completed) AND is
+        owned by requesting_user. Unknown ids return False, so an unauthorized caller cannot
+        distinguish "not yours" from "does not exist"."""
+        with self._session_state_lock:
+            session = self.active_terminal_sessions.get(session_id)
+            owner = session.owner_user if session is not None else None
+            if session is None:
+                completed = self.completed_session_history.get(session_id)
+                if completed is None:
+                    return False
+                owner = completed.owner_user
+        return owner == requesting_user
+
+    def get_list_of_all_active_sessions_with_status(self, requesting_user: Optional[str] = None) -> List[Dict[str, any]]:
+        """Get list of active sessions with their status.
+
+        B6: only sessions owned by requesting_user are returned (None owner matches None user
+        when auth is not configured)."""
         
         current_time = datetime.now()
         active_sessions = []
         
-        for session_id, session in self.active_terminal_sessions.items():
+        with self._session_state_lock:
+            active_sessions_snapshot = list(self.active_terminal_sessions.items())
+        for session_id, session in active_sessions_snapshot:
+            if session.owner_user != requesting_user:
+                continue
             runtime_seconds = (current_time - session.session_creation_timestamp).total_seconds()
             
             active_sessions.append({
@@ -689,8 +887,57 @@ class comprehensive_terminal_session_manager_with_background_support:
         
         return active_sessions
     
+    def _register_active_terminal_session(self, session_id: int, session: terminal_session_with_process_tracking):
+        """Insert a new active session under the shared-state lock, reaping oldest
+        already-completed sessions first if the active dict has grown past its bound."""
+        with self._session_state_lock:
+            self.active_terminal_sessions[session_id] = session
+            if len(self.active_terminal_sessions) > self.maximum_active_sessions_to_retain:
+                self._reap_oldest_completed_active_sessions_locked()
+
+    def _mark_terminal_session_completed(self, session_id: int):
+        """Flag a session as completed and capture its exit code (thread-safe). Called from
+        the reader thread when the process output stream ends."""
+        with self._session_state_lock:
+            session = self.active_terminal_sessions.get(session_id)
+            if session is None:
+                return
+            session.command_execution_has_completed = True
+            if session.last_exit_code is None:
+                session.last_exit_code = session.process.poll()
+
+    def _reap_completed_terminal_session_if_still_active(self, session_id: int):
+        """Move a completed session out of the active dict if it is still there, so a command
+        whose output is never polled does not leak its process/handles forever."""
+        with self._session_state_lock:
+            session = self.active_terminal_sessions.get(session_id)
+            if session is not None and session.command_execution_has_completed:
+                self._move_session_to_completed_locked(session_id)
+
+    def _reap_oldest_completed_active_sessions_locked(self):
+        """Assumes the shared-state lock is held. Move already-completed active sessions
+        (oldest first) into the completed history until the active dict is back within its
+        bound. Still-running sessions are never reaped (their processes are alive)."""
+        completed_active_session_ids_oldest_first = [
+            candidate_session_id
+            for candidate_session_id, tracked_session in sorted(
+                self.active_terminal_sessions.items(),
+                key=lambda id_and_session: id_and_session[1].session_creation_timestamp
+            )
+            if tracked_session.command_execution_has_completed
+        ]
+        for session_id_to_reap in completed_active_session_ids_oldest_first:
+            if len(self.active_terminal_sessions) <= self.maximum_active_sessions_to_retain:
+                break
+            self._move_session_to_completed_locked(session_id_to_reap)
+
     def _move_session_to_completed(self, session_id: int):
-        """Move a session from active to completed"""
+        """Move a session from active to completed (acquires the shared-state lock)."""
+        with self._session_state_lock:
+            self._move_session_to_completed_locked(session_id)
+
+    def _move_session_to_completed_locked(self, session_id: int):
+        """Assumes the shared-state lock is held. Move a session from active to completed."""
         
         session = self.active_terminal_sessions.get(session_id)
         if not session:
@@ -701,7 +948,8 @@ class comprehensive_terminal_session_manager_with_background_support:
             complete_output_text=session.accumulated_output_buffer,
             final_exit_code=session.last_exit_code,
             session_start_time=session.session_creation_timestamp,
-            session_end_time=datetime.now()
+            session_end_time=datetime.now(),
+            owner_user=session.owner_user
         )
         
         self.completed_session_history[session_id] = completed_session
@@ -757,6 +1005,11 @@ class comprehensive_ui_tree_walker_with_text_extraction:
         self.maximum_tree_traversal_depth = 40  # Increased for Chrome/Electron apps like Signal
         self.include_all_chrome_elements = True  # Flag to include more Chrome elements
         self.is_electron_app = False  # Flag to track if we're scanning an Electron app
+        # Wall-clock budget so a huge or hung UIAutomation scan cannot block the worker
+        # (and therefore the connection) thread indefinitely.
+        self.scan_wall_clock_budget_seconds = 30.0
+        self.scan_deadline_monotonic = None  # set when a scan starts
+        self.scan_budget_was_exceeded = False
         
     def set_electron_mode(self, is_electron: bool):
         """Enable special handling for Electron apps"""
@@ -765,6 +1018,18 @@ class comprehensive_ui_tree_walker_with_text_extraction:
             self.maximum_tree_traversal_depth = 50
             self.include_all_chrome_elements = True
             MCPLogger.log(TOOL_LOG_NAME, "Electron mode enabled - using deeper scanning")
+
+    def _has_scan_wall_clock_budget_expired(self) -> bool:
+        """Return True once the scan wall-clock budget has elapsed, so a huge/hung scan stops
+        early instead of blocking the worker (and connection) thread forever."""
+        if self.scan_deadline_monotonic is None:
+            return False
+        if time.monotonic() <= self.scan_deadline_monotonic:
+            return False
+        if not self.scan_budget_was_exceeded:
+            self.scan_budget_was_exceeded = True
+            MCPLogger.log(TOOL_LOG_NAME, f"UI scan wall-clock budget ({self.scan_wall_clock_budget_seconds}s) exceeded after {self.total_elements_discovered_count} elements - stopping scan early")
+        return True
     
     def is_useful_ui_element_worth_extracting(self, element_info: extracted_ui_element_info_with_full_details) -> bool:
         """Enhanced filtering to determine if a UI element contains useful information, especially for Chrome/Electron apps"""
@@ -1117,6 +1382,10 @@ class comprehensive_ui_tree_walker_with_text_extraction:
         if current_depth > self.maximum_tree_traversal_depth:
             return
         
+        # Stop early if the scan has used its whole wall-clock budget (huge/hung tree)
+        if self._has_scan_wall_clock_budget_expired():
+            return
+        
         try:
             # Extract information from current element
             element_info = self.extract_complete_element_information_with_all_properties(
@@ -1170,11 +1439,16 @@ class comprehensive_ui_tree_walker_with_text_extraction:
             
             # Strategy 2: Scan each renderer window
             for renderer_hwnd, renderer_text, renderer_class in renderer_windows:
+                if self._has_scan_wall_clock_budget_expired():
+                    break
                 try:
                     renderer_control = auto.ControlFromHandle(renderer_hwnd)
                     if renderer_control:
                         MCPLogger.log(TOOL_LOG_NAME, f"Scanning renderer: {renderer_class}")
-                        self.extract_all_text_content_from_ui_element(renderer_control, current_depth=0)
+                        # Walk the renderer subtree so its elements are actually stored; the
+                        # previous call passed an unsupported current_depth kwarg (this method
+                        # takes only one argument), so it raised and the branch was dead.
+                        self.recursively_walk_ui_tree_and_extract_all_text_data(renderer_control)
                 except Exception as e:
                     MCPLogger.log(TOOL_LOG_NAME, f"Error scanning renderer {renderer_hwnd}: {e}")
             
@@ -1199,9 +1473,17 @@ class comprehensive_ui_tree_walker_with_text_extraction:
             MCPLogger.log(TOOL_LOG_NAME, f"Found {len(all_descendants)} total descendants via GetDescendants")
             
             for desc in all_descendants:
+                if self._has_scan_wall_clock_budget_expired():
+                    break
                 try:
                     if hasattr(desc, 'FrameworkId') and desc.FrameworkId == "Chrome":
-                        self.extract_all_text_content_from_ui_element(desc, current_depth=0)
+                        # desc is already an individual (flattened) descendant, so extract and
+                        # store this one element. The previous call passed an unsupported
+                        # current_depth kwarg and discarded the result, so this branch was dead.
+                        element_info = self.extract_complete_element_information_with_all_properties(desc)
+                        if self.is_useful_ui_element_worth_extracting(element_info) and element_info.is_visible:
+                            self.extracted_elements_with_complete_data.append(element_info)
+                            self.total_elements_discovered_count += 1
                 except:
                     continue
                     
@@ -1355,6 +1637,10 @@ class comprehensive_ui_tree_walker_with_text_extraction:
                         if not target_window or not target_window.Exists():
                             return {"error": f"Window not found with title pattern: '{window_title_pattern}'. Checked {windows_checked} windows.", "extracted_ui_elements": []}
             
+            # Start the wall-clock budget now that we have a target window, so neither the
+            # enhanced Electron scan nor the regular tree walk can block indefinitely.
+            self.scan_deadline_monotonic = time.monotonic() + self.scan_wall_clock_budget_seconds
+            
             # Special handling for Electron apps - run enhanced scanning first
             if self.is_electron_app:
                 MCPLogger.log(TOOL_LOG_NAME, "Running enhanced Electron app scanning...")
@@ -1441,6 +1727,8 @@ def get_windows_product_name():
     
     try:
         # The registry key that stores the full product name
+        # Only import winreg on Windows
+        import winreg
         key_path = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
         product_name, _ = winreg.QueryValueEx(key, "ProductName")
@@ -1454,7 +1742,7 @@ def get_windows_product_name():
 TOOLS = [
     {
         "name": TOOL_NAME,
-        "description": f"""Use this tool to automate and manage the users operating-system ({get_windows_product_name()}), desktop, and applications etc.
+        "description": f"""Use this tool to automate and manage the users operating-system ({get_windows_product_name()}), desktop, and applications etc. Works on Windows, macOS, and Linux (some GUI operations vary by platform - see readme).
 """,
         "parameters": {
             "properties": {
@@ -1528,7 +1816,7 @@ TOOLS = [
                 },
                 "text": {
                     "type": "string",
-                    "description": "Text to send to the window"
+                    "description": "Text/keystrokes to send using AutoHotkey-style syntax. Supports: {Enter}, {Tab}, {Escape}, {F1}-{F24}, arrow keys, etc. Modifiers: ^ (Ctrl), + (Shift), ! (Alt), # (Win). Examples: 'Hello{Enter}', '^c' (Ctrl+C), '!{F4}' (Alt+F4), '#r' (Win+R), '{Tab 3}' (Tab x3). Escape braces with {{} and {}}. Use {Raw}text for literal text."
                 },
                 "filename": {
                     "type": "string",
@@ -1649,11 +1937,32 @@ TOOLS = [
         # every feature and how to use it.
 
         "readme": """
-Windows Desktop Automation and Management Tool
+Desktop Automation and Management Tool (Windows / macOS / Linux)
 
-A comprehensive tool for Windows desktop automation, window management, UI interaction,
-and layout control. This tool provides programmatic access to Windows desktop operations
-that would typically require manual interaction.
+A comprehensive tool for desktop automation, window management, UI interaction, and layout
+control. It provides programmatic access to desktop operations that would typically require
+manual interaction.
+
+## Platform Support
+Operations behave the same across platforms where implemented, but coverage differs:
+- Windows: all operations (uses win32 APIs + UIAutomation).
+- macOS: list_windows, activate_window, move_window, take_screenshot, click_at_coordinates,
+  click_at_screen_coordinates, send_text, scan_ui_elements, get_clickable_elements,
+  click_ui_element, about (uses CoreGraphics/CGWindowList, CGEvent, the Accessibility (AX) API,
+  and the screencapture tool).
+- Linux: list_windows, activate_window, move_window, take_screenshot, about.
+An operation that a platform does not implement returns a clear "not implemented on <os>" error.
+
+### macOS permissions (important)
+- list_windows, activate_window, and about work with no special permission.
+- take_screenshot of another app's window content needs Screen Recording permission (without it
+  window titles are blank and captures may show only the desktop).
+- move_window, send_text, the click_* operations, scan_ui_elements, and click_ui_element require
+  Accessibility permission: System Settings > Privacy & Security > Accessibility, enabled for the
+  application that runs this server (e.g. aura, or your Terminal). Until it is granted, those
+  operations return an explanatory error instead of acting.
+- macOS 'hwnd' values are CoreGraphics window numbers (decimal) returned by list_windows, not
+  hex window handles. 'pid:<n>' and a literal application name are also accepted.
 
 ## Usage-Safety Token System
 This tool uses an hmac-based token system to ensure callers fully understand all details.
@@ -1686,13 +1995,14 @@ Returns:
 
 ### scan_ui_elements
 Scan a specific window and extract all UI elements with text data and coordinates.
-This provides 100% accurate text extraction without OCR by accessing Windows accessibility APIs.
-Detects accelerator keys (Alt+key shortcuts) and access keys for menu automation.
-Uses advanced window finding with multiple fallback strategies for better reliability.
+This reads the OS accessibility tree directly (no OCR): Windows UIAutomation, or the macOS
+Accessibility (AX) API. On Windows it also detects accelerator keys (Alt+key shortcuts) for menu
+automation; on macOS it returns each element's role, name/value, bounds and center coordinates.
+(Not implemented on Linux.)
 
 Parameters:
 - window_title (optional): Window title or partial title pattern to scan. Uses intelligent matching with fallbacks including exact match, substring match, case-insensitive partial match, and common title variations
-- hwnd (optional): Window handle in hexadecimal format (e.g., "0x00020828") for direct window targeting
+- hwnd (optional): Window handle for direct window targeting (Windows: hex like "0x00020828"; macOS: the CoreGraphics window number from list_windows)
 - NOTE: Either window_title or hwnd must be provided (not both)
 
 Returns:
@@ -1757,14 +2067,61 @@ Returns:
 - Success message and optionally base64 image data if no filename provided
 
 ### send_text
-Send text input to a window using modern Unicode-compatible SendInput API.
+Send text and keystrokes to a window using AutoHotkey-style syntax.
 
 Parameters:
-- hwnd (required): Window handle in hexadecimal format (e.g., "0x00020828")
-- text (required): Text string to send to the window
+- hwnd (required): Window handle (Windows: hex like "0x00020828"; macOS: the CoreGraphics window number from list_windows - its app is focused first)
+- text (required): Text/keystrokes to send using AutoHotkey-style syntax
+
+**AutoHotkey-Style Syntax:**
+
+NOTE (macOS): the same syntax works, with one mapping difference - the '#' prefix is the
+Command key on macOS (so '#c' = Command+C to copy, '#{Space}' = Command+Space). '^' is Control,
+'+' is Shift, '!' is Option/Alt. Ordinary characters are typed as Unicode regardless of keyboard
+layout.
+
+SPECIAL KEYS (in braces):
+- {Enter}, {Tab}, {Escape}/{Esc}, {Space}, {Backspace}/{BS}
+- {Delete}/{Del}, {Insert}/{Ins}, {Home}, {End}, {PageUp}/{PgUp}, {PageDown}/{PgDn}
+- {Up}, {Down}, {Left}, {Right} - Arrow keys
+- {F1} through {F24} - Function keys
+- {PrintScreen}, {Pause}, {CapsLock}, {NumLock}, {ScrollLock}
+- {Numpad0}-{Numpad9}, {NumpadMult}, {NumpadAdd}, {NumpadSub}, {NumpadDiv}, {NumpadDot}
+- {Browser_Back}, {Volume_Mute}, {Media_Play_Pause}, etc. - Media keys
+
+MODIFIER PREFIXES (outside braces):
+- ^ = Ctrl    (e.g., ^c = Ctrl+C, ^s = Ctrl+S)
+- + = Shift   (e.g., +a = Shift+A)
+- ! = Alt     (e.g., !{F4} = Alt+F4)
+- # = Win     (e.g., #r = Win+R)
+- Combine: ^+s = Ctrl+Shift+S, ^!{Delete} = Ctrl+Alt+Delete
+
+KEY REPETITION:
+- {Tab 5} - Press Tab 5 times
+- {Enter 3} - Press Enter 3 times
+
+KEY HOLD/RELEASE:
+- {Ctrl down} - Hold Ctrl key down
+- {Ctrl up} - Release Ctrl key
+- {Shift down}hello{Shift up} - Type "HELLO"
+
+LITERAL CHARACTERS (escaping):
+- {{}  - Literal { character
+- {}}  - Literal } character
+- {^}, {+}, {!}, {#} - Literal modifier symbols
+
+RAW MODE:
+- {Raw}text - Send remaining text literally without parsing
+
+EXAMPLES:
+- "Hello{Enter}" - Type "Hello" then press Enter
+- "^a^c" - Ctrl+A (select all), Ctrl+C (copy)
+- "!{F4}" - Alt+F4 (close window)
+- "#r" - Win+R (open Run dialog)
+- "{Tab 3}submit" - Press Tab 3 times, then type "submit"
 
 Returns:
-- Success message if text was sent successfully
+- Success message if text/keystrokes were sent successfully
 
 ### click_ui_element
 Click on a specific UI element within a window by name or AutomationId.
@@ -2170,7 +2527,6 @@ All parameters are passed in a single 'input' dict:
        "tool_unlock_token": """ + f'"{TOOL_UNLOCK_TOKEN}"' + """
      }
    }
-```
 
 ## Window Object Properties
 Each window object contains:
@@ -2483,14 +2839,17 @@ def activate_window_functional(hwnd_str: str, request_focus: bool = False) -> Tu
         # Method 3: Alt key injection + SetForegroundWindow
         if not success and request_focus:
             try:
-                # Inject Alt key press and release using advanced SendInput
-                inp = (INPUT * 2)()
+                # Inject Alt key press and release using advanced SendInput. Use INPUT_FULL
+                # (the full-size INPUT with the complete union) and its size, as
+                # send_text_functional already does, so the 64-bit structure size is correct
+                # and SendInput does not silently reject the array.
+                inp = (INPUT_FULL * 2)()
                 inp[0].type = win32con.INPUT_KEYBOARD
                 inp[0].ki = KEYBDINPUT(wVk=win32con.VK_MENU)
                 inp[1].type = win32con.INPUT_KEYBOARD
                 inp[1].ki = KEYBDINPUT(wVk=win32con.VK_MENU, dwFlags=win32con.KEYEVENTF_KEYUP)
                 
-                if user32.SendInput(2, inp, ctypes.sizeof(INPUT)) == 2:
+                if user32.SendInput(2, inp, ctypes.sizeof(INPUT_FULL)) == 2:
                     time.sleep(0.01)
                     if win32gui.SetForegroundWindow(hwnd):
                         MCPLogger.log(TOOL_LOG_NAME, "Method 3: Alt key injection succeeded")
@@ -2605,13 +2964,51 @@ def activate_window_functional(hwnd_str: str, request_focus: bool = False) -> Tu
             # For bring-to-front only, check if TOPMOST trick worked
             return True, f"Window 0x{hwnd:08X} brought to front: '{title}' (focus not requested)"
         else:
-            MCPLogger.log(TOOL_LOG_NAME, f"Could not bring window to foreground. Current foreground: 0x{current_fg:08X if current_fg else 0}")
-            return False, f"Could not activate window 0x{hwnd:08X}: '{title}'. Current foreground: 0x{current_fg:08X if current_fg else 0}"
+            # Precompute the hex form; "0x{current_fg:08X if current_fg else 0}" is an invalid
+            # format spec that raised ValueError on this failure path (crashing the handler).
+            fg_hex = f"0x{current_fg:08X}" if current_fg else "0x00000000"
+            MCPLogger.log(TOOL_LOG_NAME, f"Could not bring window to foreground. Current foreground: {fg_hex}")
+            return False, f"Could not activate window 0x{hwnd:08X}: '{title}'. Current foreground: {fg_hex}"
 
-# Global variable to store the last UI scanner instance
-_last_ui_scanner: Optional[comprehensive_ui_tree_walker_with_text_extraction] = None
+# Per-session store of the most recent UI scanner instance. Keyed by MCP session id so one
+# caller's get_clickable_elements cannot return another concurrent caller's scan (the old
+# single module-level scanner was overwritten by whichever scan ran last). scan_ui_elements
+# also now returns its clickable elements inline in the response, so callers do not have to
+# depend on this shared state at all.
+_ui_scanners_by_session_key: Dict[object, comprehensive_ui_tree_walker_with_text_extraction] = {}
+_ui_scanners_by_session_key_lock = threading.Lock()
+_MAX_RETAINED_UI_SCANNERS = 64
+_DEFAULT_UI_SCANNER_SESSION_KEY = "__no_session__"
 
-def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Optional[str] = None) -> Dict[str, any]:
+
+def _normalize_ui_scanner_session_key(session_key: object) -> object:
+    """Map a possibly-missing MCP session id to a stable dict key."""
+    return session_key if session_key is not None else _DEFAULT_UI_SCANNER_SESSION_KEY
+
+
+def _store_ui_scanner_for_session(session_key: object, ui_scanner: comprehensive_ui_tree_walker_with_text_extraction) -> None:
+    """Store the most recent scanner for a session (locked + bounded so a long-lived server
+    with many sessions cannot grow the store without limit)."""
+    key = _normalize_ui_scanner_session_key(session_key)
+    with _ui_scanners_by_session_key_lock:
+        _ui_scanners_by_session_key[key] = ui_scanner
+        if len(_ui_scanners_by_session_key) > _MAX_RETAINED_UI_SCANNERS:
+            for oldest_stored_key in list(_ui_scanners_by_session_key.keys()):
+                if oldest_stored_key == key:
+                    continue
+                del _ui_scanners_by_session_key[oldest_stored_key]
+                if len(_ui_scanners_by_session_key) <= _MAX_RETAINED_UI_SCANNERS:
+                    break
+
+
+def _get_ui_scanner_for_session(session_key: object) -> Optional[comprehensive_ui_tree_walker_with_text_extraction]:
+    """Return the most recent scanner stored for a session, or None if there is none."""
+    key = _normalize_ui_scanner_session_key(session_key)
+    with _ui_scanners_by_session_key_lock:
+        return _ui_scanners_by_session_key.get(key)
+
+
+def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Optional[str] = None, session_key: object = None) -> Dict[str, any]:
     """Scan a specific window and extract all UI elements with text data and coordinates.
     
     This is the core functional implementation that can be called independently
@@ -2620,12 +3017,12 @@ def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Op
     Args:
         window_title: Window title or partial title pattern to scan (optional if hwnd_str provided)
         hwnd_str: Window handle in hexadecimal format (optional if window_title provided)
+        session_key: Opaque per-caller key (MCP session id) used to isolate this caller's
+            scanner from other concurrent callers'
         
     Returns:
         Dictionary containing window info, scan summary, and extracted UI elements
     """
-    global _last_ui_scanner
-    
     try:
         if window_title:
             MCPLogger.log(TOOL_LOG_NAME, f"Starting UI scan for window: '{window_title}'")
@@ -2643,8 +3040,15 @@ def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Op
             hwnd_str=hwnd_str
         )
         
-        # Store the scanner instance for get_clickable_elements
-        _last_ui_scanner = ui_scanner
+        # Store the scanner keyed by session (for a later get_clickable_elements on the same
+        # session) and also return the clickable elements inline so the response is fully
+        # self-contained - no reliance on shared server-side state that a concurrent scan
+        # could clobber.
+        _store_ui_scanner_for_session(session_key, ui_scanner)
+        if "error" not in scan_result:
+            inline_clickable_elements = ui_scanner.find_all_buttons_and_clickable_elements_with_coordinates()
+            scan_result["clickable_elements"] = inline_clickable_elements
+            scan_result["total_clickable_found"] = len(inline_clickable_elements)
         
         MCPLogger.log(TOOL_LOG_NAME, f"UI scan completed. Found {len(scan_result.get('extracted_ui_elements', []))} elements")
         
@@ -2658,28 +3062,31 @@ def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Op
         MCPLogger.log(TOOL_LOG_NAME, error_msg)
         return {"error": error_msg, "extracted_ui_elements": []}
 
-def get_clickable_elements_functional() -> Dict[str, any]:
-    """Extract all clickable elements from the last UI scan.
+def get_clickable_elements_functional(session_key: object = None) -> Dict[str, any]:
+    """Extract all clickable elements from this caller's last UI scan.
     
     This is the core functional implementation that can be called independently
     or via the MCP interface.
     
+    Args:
+        session_key: Opaque per-caller key (MCP session id); only this session's own last
+            scan is used, so one caller cannot receive another caller's clickable elements
+        
     Returns:
         Dictionary containing clickable elements with coordinates
     """
-    global _last_ui_scanner
-    
     try:
-        if _last_ui_scanner is None:
+        ui_scanner = _get_ui_scanner_for_session(session_key)
+        if ui_scanner is None:
             return {
-                "error": "No UI scan data available. Please call scan_ui_elements first.",
+                "error": "No UI scan data available for this session. Please call scan_ui_elements first (its response also includes clickable_elements inline).",
                 "clickable_elements": []
             }
         
         MCPLogger.log(TOOL_LOG_NAME, "Extracting clickable elements from last scan")
         
         # Get clickable elements
-        clickable_elements = _last_ui_scanner.find_all_buttons_and_clickable_elements_with_coordinates()
+        clickable_elements = ui_scanner.find_all_buttons_and_clickable_elements_with_coordinates()
         
         MCPLogger.log(TOOL_LOG_NAME, f"Found {len(clickable_elements)} clickable elements")
         
@@ -2975,15 +3382,285 @@ def take_screenshot_functional(hwnd_str: str, filename: Optional[str] = None, re
     except Exception as e:
         return False, f"Error taking screenshot: {e}", None
 
+# ============================================================================
+# AUTOHOTKEY-STYLE KEY PARSING FOR send_text
+# ============================================================================
+# Virtual Key Codes for special keys (Windows VK_ constants)
+VIRTUAL_KEY_CODES = {
+    # Function keys
+    'f1': 0x70, 'f2': 0x71, 'f3': 0x72, 'f4': 0x73, 'f5': 0x74, 'f6': 0x75,
+    'f7': 0x76, 'f8': 0x77, 'f9': 0x78, 'f10': 0x79, 'f11': 0x7A, 'f12': 0x7B,
+    'f13': 0x7C, 'f14': 0x7D, 'f15': 0x7E, 'f16': 0x7F, 'f17': 0x80, 'f18': 0x81,
+    'f19': 0x82, 'f20': 0x83, 'f21': 0x84, 'f22': 0x85, 'f23': 0x86, 'f24': 0x87,
+    
+    # Navigation keys
+    'enter': 0x0D, 'return': 0x0D,
+    'escape': 0x1B, 'esc': 0x1B,
+    'tab': 0x09,
+    'space': 0x20,
+    'backspace': 0x08, 'bs': 0x08,
+    'delete': 0x2E, 'del': 0x2E,
+    'insert': 0x2D, 'ins': 0x2D,
+    'home': 0x24, 'end': 0x23,
+    'pageup': 0x21, 'pgup': 0x21,
+    'pagedown': 0x22, 'pgdn': 0x22,
+    
+    # Arrow keys
+    'up': 0x26, 'down': 0x28, 'left': 0x25, 'right': 0x27,
+    
+    # Modifier keys (for explicit down/up control)
+    'ctrl': 0x11, 'control': 0x11, 'lctrl': 0xA2, 'rctrl': 0xA3,
+    'lcontrol': 0xA2, 'rcontrol': 0xA3,
+    'shift': 0x10, 'lshift': 0xA0, 'rshift': 0xA1,
+    'alt': 0x12, 'lalt': 0xA4, 'ralt': 0xA5,
+    'win': 0x5B, 'lwin': 0x5B, 'rwin': 0x5C,
+    
+    # Lock keys
+    'capslock': 0x14, 'numlock': 0x90, 'scrolllock': 0x91,
+    
+    # Special keys
+    'printscreen': 0x2C, 'pause': 0x13, 'break': 0x03,
+    'apps': 0x5D, 'appskey': 0x5D,  # Context menu key
+    'sleep': 0x5F,
+    
+    # Numpad keys
+    'numpad0': 0x60, 'numpad1': 0x61, 'numpad2': 0x62, 'numpad3': 0x63,
+    'numpad4': 0x64, 'numpad5': 0x65, 'numpad6': 0x66, 'numpad7': 0x67,
+    'numpad8': 0x68, 'numpad9': 0x69,
+    'numpadmult': 0x6A, 'numpadmul': 0x6A, 'numpad*': 0x6A,
+    'numpadadd': 0x6B, 'numpad+': 0x6B,
+    'numpadsub': 0x6D, 'numpad-': 0x6D,
+    'numpaddot': 0x6E, 'numpad.': 0x6E,
+    'numpaddiv': 0x6F, 'numpad/': 0x6F,
+    'numpadenter': 0x0D,  # Same as Enter
+    
+    # Numpad navigation (NumLock off)
+    'numpadins': 0x2D, 'numpaddel': 0x2E, 'numpadhome': 0x24, 'numpadend': 0x23,
+    'numpadpgup': 0x21, 'numpadpgdn': 0x22, 'numpadup': 0x26, 'numpaddown': 0x28,
+    'numpadleft': 0x25, 'numpadright': 0x27, 'numpadclear': 0x0C,
+    
+    # Browser/Media keys
+    'browser_back': 0xA6, 'browser_forward': 0xA7, 'browser_refresh': 0xA8,
+    'browser_stop': 0xA9, 'browser_search': 0xAA, 'browser_favorites': 0xAB,
+    'browser_home': 0xAC,
+    'volume_mute': 0xAD, 'volume_down': 0xAE, 'volume_up': 0xAF,
+    'media_next': 0xB0, 'media_prev': 0xB1, 'media_stop': 0xB2, 'media_play_pause': 0xB3,
+    'launch_mail': 0xB4, 'launch_media': 0xB5, 'launch_app1': 0xB6, 'launch_app2': 0xB7,
+}
+
+# Modifier key prefixes (AutoHotkey style)
+MODIFIER_PREFIXES = {
+    '^': 0x11,  # Ctrl
+    '+': 0x10,  # Shift  
+    '!': 0x12,  # Alt
+    '#': 0x5B,  # Win
+}
+
+def parse_autohotkey_text_to_input_events(text: str) -> List[Tuple[str, int, Optional[int]]]:
+    """Parse AutoHotkey-style text into a list of input events.
+    
+    Supports:
+    - {Enter}, {Escape}, {Tab}, {F1}-{F24}, etc. - Special keys
+    - {Key down}, {Key up} - Hold/release keys
+    - {Key 5} - Repeat key 5 times
+    - ^c, +a, !f, #r - Modifier+key (Ctrl+C, Shift+A, Alt+F, Win+R)
+    - {^}, {+}, {!}, {#} - Literal modifier symbols
+    - {{}  - Literal {
+    - {}}  - Literal }
+    - {Raw}text - Send remaining text literally (no parsing)
+    - {Text}text - Same as {Raw}
+    
+    Returns:
+        List of tuples: (event_type, vk_code_or_char, repeat_count)
+        event_type: 'vk_press', 'vk_down', 'vk_up', 'unicode'
+    """
+    events = []
+    i = 0
+    raw_mode = False
+    
+    while i < len(text):
+        # Raw mode - send everything literally
+        if raw_mode:
+            events.append(('unicode', ord(text[i]), None))
+            i += 1
+            continue
+        
+        char = text[i]
+        
+        # Check for modifier prefixes (^, +, !, #)
+        if char in MODIFIER_PREFIXES and i + 1 < len(text):
+            next_char = text[i + 1]
+            
+            # Check if next is a brace sequence like ^{Enter}
+            if next_char == '{':
+                # Find closing brace
+                close_idx = text.find('}', i + 2)
+                if close_idx != -1:
+                    key_spec = text[i + 2:close_idx].lower().strip()
+                    vk = VIRTUAL_KEY_CODES.get(key_spec)
+                    if vk is not None:
+                        # Modifier + special key
+                        mod_vk = MODIFIER_PREFIXES[char]
+                        events.append(('vk_down', mod_vk, None))
+                        events.append(('vk_press', vk, None))
+                        events.append(('vk_up', mod_vk, None))
+                        i = close_idx + 1
+                        continue
+            
+            # Modifier + single character
+            if next_char not in '{':
+                mod_vk = MODIFIER_PREFIXES[char]
+                # Get VK code for the character (uppercase for letter keys)
+                if next_char.isalpha():
+                    char_vk = ord(next_char.upper())
+                elif next_char.isdigit():
+                    char_vk = ord(next_char)
+                else:
+                    # For other characters, use VkKeyScan to get the VK code
+                    char_vk = None
+                
+                if char_vk:
+                    events.append(('vk_down', mod_vk, None))
+                    events.append(('vk_press', char_vk, None))
+                    events.append(('vk_up', mod_vk, None))
+                    i += 2
+                    continue
+        
+        # Check for brace sequences {Key}
+        if char == '{':
+            close_idx = text.find('}', i + 1)
+            if close_idx != -1:
+                brace_content = text[i + 1:close_idx]
+                
+                # Escape sequences for literal braces and modifier symbols
+                if brace_content == '{':
+                    events.append(('unicode', ord('{'), None))
+                    i = close_idx + 1
+                    continue
+                elif brace_content == '}':
+                    events.append(('unicode', ord('}'), None))
+                    i = close_idx + 1
+                    continue
+                elif brace_content == '^':
+                    events.append(('unicode', ord('^'), None))
+                    i = close_idx + 1
+                    continue
+                elif brace_content == '+':
+                    events.append(('unicode', ord('+'), None))
+                    i = close_idx + 1
+                    continue
+                elif brace_content == '!':
+                    events.append(('unicode', ord('!'), None))
+                    i = close_idx + 1
+                    continue
+                elif brace_content == '#':
+                    events.append(('unicode', ord('#'), None))
+                    i = close_idx + 1
+                    continue
+                
+                # Raw/Text mode
+                if brace_content.lower() in ('raw', 'text'):
+                    raw_mode = True
+                    i = close_idx + 1
+                    continue
+                
+                # Parse key specification (may include "down", "up", or repeat count)
+                parts = brace_content.split()
+                key_name = parts[0].lower()
+                modifier = parts[1].lower() if len(parts) > 1 else None
+                
+                # Check for repeat count (e.g., {Tab 5})
+                repeat_count = 1
+                if modifier and modifier.isdigit():
+                    repeat_count = int(modifier)
+                    modifier = None
+                elif len(parts) > 2 and parts[1].isdigit():
+                    repeat_count = int(parts[1])
+                
+                vk = VIRTUAL_KEY_CODES.get(key_name)
+                if vk is not None:
+                    if modifier == 'down':
+                        events.append(('vk_down', vk, None))
+                    elif modifier == 'up':
+                        events.append(('vk_up', vk, None))
+                    else:
+                        for _ in range(repeat_count):
+                            events.append(('vk_press', vk, None))
+                    i = close_idx + 1
+                    continue
+                
+                # Unknown key in braces - send literally
+                for c in brace_content:
+                    events.append(('unicode', ord(c), None))
+                i = close_idx + 1
+                continue
+        
+        # Regular character - send as Unicode
+        events.append(('unicode', ord(char), None))
+        i += 1
+    
+    return events
+
+
 def send_text_functional(hwnd_str: str, text: str) -> Tuple[bool, str]:
-    """Send text input to a window using modern SendInput API.
+    """Send text/keystrokes to a window using AutoHotkey-style syntax.
+    
+    Supports AutoHotkey-style special key sequences:
+    
+    SPECIAL KEYS (in braces):
+        {Enter}, {Tab}, {Escape}/{Esc}, {Space}, {Backspace}/{BS}
+        {Delete}/{Del}, {Insert}/{Ins}, {Home}, {End}, {PageUp}/{PgUp}, {PageDown}/{PgDn}
+        {Up}, {Down}, {Left}, {Right} - Arrow keys
+        {F1} through {F24} - Function keys
+        {PrintScreen}, {Pause}, {CapsLock}, {NumLock}, {ScrollLock}
+        {Numpad0}-{Numpad9}, {NumpadMult}, {NumpadAdd}, {NumpadSub}, {NumpadDiv}, {NumpadDot}, {NumpadEnter}
+        {Browser_Back}, {Volume_Mute}, {Media_Play_Pause}, etc. - Media keys
+    
+    MODIFIER PREFIXES (outside braces):
+        ^ = Ctrl    (e.g., ^c = Ctrl+C, ^s = Ctrl+S)
+        + = Shift   (e.g., +a = Shift+A = uppercase A)
+        ! = Alt     (e.g., !{F4} = Alt+F4)
+        # = Win     (e.g., #r = Win+R to open Run dialog)
+        
+        Combine modifiers: ^+s = Ctrl+Shift+S, ^!{Delete} = Ctrl+Alt+Delete
+    
+    KEY REPETITION:
+        {Tab 5} - Press Tab 5 times
+        {Enter 3} - Press Enter 3 times
+    
+    KEY HOLD/RELEASE:
+        {Ctrl down} - Hold Ctrl key down
+        {Ctrl up} - Release Ctrl key
+        {Shift down}hello{Shift up} - Type "HELLO"
+    
+    LITERAL CHARACTERS (escaping):
+        {{}  - Literal { character
+        {}}  - Literal } character
+        {^}  - Literal ^ character
+        {+}  - Literal + character
+        {!}  - Literal ! character
+        {#}  - Literal # character
+    
+    RAW MODE:
+        {Raw}text - Send all remaining text literally without parsing
+        {Text}text - Same as {Raw}
+    
+    EXAMPLES:
+        "Hello{Enter}"           - Type "Hello" then press Enter
+        "^a^c"                   - Ctrl+A (select all), Ctrl+C (copy)
+        "!{F4}"                  - Alt+F4 (close window)
+        "#r"                     - Win+R (open Run dialog)
+        "{Tab 3}submit"          - Press Tab 3 times, then type "submit"
+        "Price: $100{!}"         - Type "Price: $100!" (! is literal in braces)
+        "{Ctrl down}ac{Ctrl up}" - Hold Ctrl, press A then C, release Ctrl
+        "{Raw}^not a hotkey^"    - Sends literal "^not a hotkey^"
     
     Args:
-        hwnd_str: Window handle as hexadecimal string
-        text: Text to send to the window
+        hwnd_str: Window handle as hexadecimal string (e.g., "0x00020828")
+        text: Text/keystrokes to send using AutoHotkey-style syntax
         
     Returns:
-        Tuple of (success, message)
+        Tuple of (success: bool, message: str)
     """
     try:
         # Convert hex string to integer
@@ -3004,29 +3681,86 @@ def send_text_functional(hwnd_str: str, text: str) -> Tuple[bool, str]:
         # Small delay to ensure window has focus
         time.sleep(0.2)
         
+        # Parse the AutoHotkey-style text into input events
+        parsed_events = parse_autohotkey_text_to_input_events(text)
+        
+        # B3: optionally refuse Win-key (Super) chords such as #r (Win+R) / #e, which let an
+        # injected caller open Run/Explorer and pivot to whole-desktop control. Only enforced
+        # when an operator sets system_tool_security.allow_win_key_chords=false; the check is
+        # parser-accurate (VK_LWIN 0x5B / VK_RWIN 0x5C) so a literal '{#}' is unaffected.
+        if not _capability_is_allowed(_get_system_tool_security_policy(), "allow_win_key_chords"):
+            win_key_virtual_codes = {0x5B, 0x5C}
+            if any(event_type in ("vk_press", "vk_down", "vk_up") and code in win_key_virtual_codes
+                   for event_type, code, _ in parsed_events):
+                return False, ("Win-key (Super) chords are disabled by this server's system_tool_security "
+                               "policy (allow_win_key_chords=false).")
+        
         # Prepare input array for SendInput
         inputs = []
         
-        for char in text:
-            # Key down event
-            key_input = INPUT_FULL()
-            key_input.type = 1  # INPUT_KEYBOARD
-            key_input.u.ki.wVk = 0
-            key_input.u.ki.wScan = ord(char)
-            key_input.u.ki.dwFlags = KEYEVENTF_UNICODE
-            key_input.u.ki.time = 0
-            key_input.u.ki.dwExtraInfo = 0
-            inputs.append(key_input)
-            
-            # Key up event
-            key_input_up = INPUT_FULL()
-            key_input_up.type = 1  # INPUT_KEYBOARD
-            key_input_up.u.ki.wVk = 0
-            key_input_up.u.ki.wScan = ord(char)
-            key_input_up.u.ki.dwFlags = KEYEVENTF_UNICODE | 0x0002  # KEYEVENTF_KEYUP
-            key_input_up.u.ki.time = 0
-            key_input_up.u.ki.dwExtraInfo = 0
-            inputs.append(key_input_up)
+        for event_type, code, _ in parsed_events:
+            if event_type == 'unicode':
+                # Unicode character - use scan code
+                key_input = INPUT_FULL()
+                key_input.type = 1  # INPUT_KEYBOARD
+                key_input.u.ki.wVk = 0
+                key_input.u.ki.wScan = code
+                key_input.u.ki.dwFlags = KEYEVENTF_UNICODE
+                key_input.u.ki.time = 0
+                key_input.u.ki.dwExtraInfo = 0
+                inputs.append(key_input)
+                
+                # Key up event
+                key_input_up = INPUT_FULL()
+                key_input_up.type = 1  # INPUT_KEYBOARD
+                key_input_up.u.ki.wVk = 0
+                key_input_up.u.ki.wScan = code
+                key_input_up.u.ki.dwFlags = KEYEVENTF_UNICODE | 0x0002  # KEYEVENTF_KEYUP
+                key_input_up.u.ki.time = 0
+                key_input_up.u.ki.dwExtraInfo = 0
+                inputs.append(key_input_up)
+                
+            elif event_type == 'vk_press':
+                # Virtual key press (down + up)
+                key_input = INPUT_FULL()
+                key_input.type = 1  # INPUT_KEYBOARD
+                key_input.u.ki.wVk = code
+                key_input.u.ki.wScan = 0
+                key_input.u.ki.dwFlags = 0  # Key down
+                key_input.u.ki.time = 0
+                key_input.u.ki.dwExtraInfo = 0
+                inputs.append(key_input)
+                
+                key_input_up = INPUT_FULL()
+                key_input_up.type = 1  # INPUT_KEYBOARD
+                key_input_up.u.ki.wVk = code
+                key_input_up.u.ki.wScan = 0
+                key_input_up.u.ki.dwFlags = 0x0002  # KEYEVENTF_KEYUP
+                key_input_up.u.ki.time = 0
+                key_input_up.u.ki.dwExtraInfo = 0
+                inputs.append(key_input_up)
+                
+            elif event_type == 'vk_down':
+                # Virtual key down only
+                key_input = INPUT_FULL()
+                key_input.type = 1  # INPUT_KEYBOARD
+                key_input.u.ki.wVk = code
+                key_input.u.ki.wScan = 0
+                key_input.u.ki.dwFlags = 0  # Key down
+                key_input.u.ki.time = 0
+                key_input.u.ki.dwExtraInfo = 0
+                inputs.append(key_input)
+                
+            elif event_type == 'vk_up':
+                # Virtual key up only
+                key_input_up = INPUT_FULL()
+                key_input_up.type = 1  # INPUT_KEYBOARD
+                key_input_up.u.ki.wVk = code
+                key_input_up.u.ki.wScan = 0
+                key_input_up.u.ki.dwFlags = 0x0002  # KEYEVENTF_KEYUP
+                key_input_up.u.ki.time = 0
+                key_input_up.u.ki.dwExtraInfo = 0
+                inputs.append(key_input_up)
             
         # Send all input events
         if inputs:
@@ -3036,8 +3770,12 @@ def send_text_functional(hwnd_str: str, text: str) -> Tuple[bool, str]:
             if sent_count != len(inputs):
                 return False, f"SendInput failed: sent {sent_count} of {len(inputs)} events"
                 
-        MCPLogger.log(TOOL_LOG_NAME, f"Sent text input: '{text}' to window 0x{hwnd:08X}")
-        return True, f"Successfully sent text '{text}' to window 0x{hwnd:08X}"
+        # Create a display-friendly version of the text for the caller-facing message only.
+        # B5: the server log must not contain the typed content (may be passwords/secrets),
+        # so it records a redacted descriptor instead of the text itself.
+        display_text = text[:50] + "..." if len(text) > 50 else text
+        MCPLogger.log(TOOL_LOG_NAME, f"Sent text/keys: {_redact_sensitive_for_log(text)} to window 0x{hwnd:08X}")
+        return True, f"Successfully sent text '{display_text}' to window 0x{hwnd:08X}"
         
     except Exception as e:
         return False, f"Error sending text: {e}"
@@ -3114,7 +3852,7 @@ def click_ui_element_functional(hwnd_str: str, element_name: str) -> Tuple[bool,
 # TERMINAL COMMAND EXECUTION FUNCTIONAL IMPLEMENTATIONS
 # ============================================================================
 
-def execute_command_functional(command: str, timeout_ms: int = 30000, shell: Optional[str] = None) -> Dict[str, any]:
+def execute_command_functional(command: str, timeout_ms: int = 30000, shell: Optional[str] = None, owner_user: Optional[str] = None) -> Dict[str, any]:
     """Execute a terminal command with timeout support, allowing it to continue in background.
     
     This is the core functional implementation that can be called independently
@@ -3124,6 +3862,8 @@ def execute_command_functional(command: str, timeout_ms: int = 30000, shell: Opt
         command: The command to execute
         timeout_ms: Timeout in milliseconds for initial output collection
         shell: Optional shell to use for execution
+        owner_user: Authenticated user that owns the resulting session (B6). Only this user
+            may later read_output/force_terminate/list it; None when auth is not configured.
         
     Returns:
         Dictionary containing execution result
@@ -3131,13 +3871,14 @@ def execute_command_functional(command: str, timeout_ms: int = 30000, shell: Opt
     global _global_terminal_session_manager
     
     try:
-        MCPLogger.log(TOOL_LOG_NAME, f"Executing command: {command[:100]}{'...' if len(command) > 100 else ''}")
+        MCPLogger.log(TOOL_LOG_NAME, f"Executing command: {_redact_sensitive_for_log(command)}")
         
         # Execute the command
         result = _global_terminal_session_manager.start_command_execution_with_timeout_and_background_support(
             command_text=command,
             timeout_milliseconds=timeout_ms,
-            shell_path=shell
+            shell_path=shell,
+            owner_user=owner_user
         )
         
         # Check for errors
@@ -3171,7 +3912,7 @@ def execute_command_functional(command: str, timeout_ms: int = 30000, shell: Opt
             "session_id": -1
         }
 
-def read_output_functional(session_id: int, timeout_ms: int = 5000) -> Dict[str, any]:
+def read_output_functional(session_id: int, timeout_ms: int = 5000, requesting_user: Optional[str] = None) -> Dict[str, any]:
     """Read new output from a running command session.
     
     This is the core functional implementation that can be called independently
@@ -3180,6 +3921,7 @@ def read_output_functional(session_id: int, timeout_ms: int = 5000) -> Dict[str,
     Args:
         session_id: The session ID returned from execute_command
         timeout_ms: Timeout in milliseconds to wait for new output
+        requesting_user: Authenticated caller (B6); must match the session owner.
         
     Returns:
         Dictionary containing output result
@@ -3188,6 +3930,14 @@ def read_output_functional(session_id: int, timeout_ms: int = 5000) -> Dict[str,
     
     try:
         MCPLogger.log(TOOL_LOG_NAME, f"Reading output from session {session_id}")
+        
+        # B6: refuse to read a session owned by a different authenticated user.
+        if not _global_terminal_session_manager.session_is_accessible_by_user(session_id, requesting_user):
+            return {
+                "success": False,
+                "error": f"No session found for ID {session_id}",
+                "session_id": session_id
+            }
         
         # Read output from the session
         output, timeout_reached = _global_terminal_session_manager.read_new_output_from_session_with_timeout(
@@ -3212,7 +3962,7 @@ def read_output_functional(session_id: int, timeout_ms: int = 5000) -> Dict[str,
             "session_id": session_id
         }
 
-def force_terminate_functional(session_id: int) -> Dict[str, any]:
+def force_terminate_functional(session_id: int, requesting_user: Optional[str] = None) -> Dict[str, any]:
     """Force terminate a running command session.
     
     This is the core functional implementation that can be called independently
@@ -3220,6 +3970,7 @@ def force_terminate_functional(session_id: int) -> Dict[str, any]:
     
     Args:
         session_id: The session ID to terminate
+        requesting_user: Authenticated caller (B6); must match the session owner.
         
     Returns:
         Dictionary containing termination result
@@ -3228,6 +3979,15 @@ def force_terminate_functional(session_id: int) -> Dict[str, any]:
     
     try:
         MCPLogger.log(TOOL_LOG_NAME, f"Force terminating session {session_id}")
+        
+        # B6: refuse to terminate a session owned by a different authenticated user. Report it
+        # as "no active session" so a caller cannot probe for other users' session ids.
+        if not _global_terminal_session_manager.session_is_accessible_by_user(session_id, requesting_user):
+            return {
+                "success": False,
+                "session_id": session_id,
+                "error": f"No active session found for ID {session_id}"
+            }
         
         # Terminate the session
         success = _global_terminal_session_manager.force_terminate_session_with_cleanup(session_id)
@@ -3254,11 +4014,14 @@ def force_terminate_functional(session_id: int) -> Dict[str, any]:
             "session_id": session_id
         }
 
-def list_sessions_functional() -> Dict[str, any]:
+def list_sessions_functional(requesting_user: Optional[str] = None) -> Dict[str, any]:
     """List all active command sessions.
     
     This is the core functional implementation that can be called independently
     or via the MCP interface.
+    
+    Args:
+        requesting_user: Authenticated caller (B6); only sessions owned by this user are listed.
     
     Returns:
         Dictionary containing list of active sessions
@@ -3268,8 +4031,8 @@ def list_sessions_functional() -> Dict[str, any]:
     try:
         MCPLogger.log(TOOL_LOG_NAME, "Listing active sessions")
         
-        # Get list of active sessions
-        sessions = _global_terminal_session_manager.get_list_of_all_active_sessions_with_status()
+        # Get list of active sessions owned by the requesting user (B6)
+        sessions = _global_terminal_session_manager.get_list_of_all_active_sessions_with_status(requesting_user=requesting_user)
         
         return {
             "success": True,
@@ -3331,6 +4094,12 @@ def write_file_functional(path: str, content: str) -> Tuple[bool, str, Optional[
         # Resolve path
         absolute_path = resolve_file_path(path)
         
+        # B2: enforce the optional file-access jail before creating dirs or writing anything.
+        path_is_allowed, path_denial_reason = _verify_file_path_within_policy(absolute_path, path)
+        if not path_is_allowed:
+            MCPLogger.log(TOOL_LOG_NAME, f"write_file denied by file-access policy: {path_denial_reason}")
+            return False, path_denial_reason, None
+        
         # Create parent directories if they don't exist
         parent_dir = os.path.dirname(absolute_path)
         if parent_dir and not os.path.exists(parent_dir):
@@ -3368,6 +4137,12 @@ def read_file_functional(path: str) -> Tuple[bool, str, Optional[str]]:
         
         # Resolve path
         absolute_path = resolve_file_path(path)
+        
+        # B2: enforce the optional file-access jail before disclosing any file contents.
+        path_is_allowed, path_denial_reason = _verify_file_path_within_policy(absolute_path, path)
+        if not path_is_allowed:
+            MCPLogger.log(TOOL_LOG_NAME, f"read_file denied by file-access policy: {path_denial_reason}")
+            return False, path_denial_reason, absolute_path
         
         # Check if file exists
         if not os.path.exists(absolute_path):
@@ -3483,11 +4258,16 @@ def validate_parameters(input_param: Dict) -> Tuple[Optional[str], Dict]:
             value = input_param[param_name]
             expected_type = param_schema.get("type")
             
-            # Type validation
+            # Type validation. bool is a subclass of int in Python, so integer/number checks
+            # explicitly exclude bool - otherwise coordinates/sizes could be passed as True/False.
             if expected_type == "string" and not isinstance(value, str):
                 return f"Parameter '{param_name}' must be a string, got {type(value).__name__}", {}
             elif expected_type == "boolean" and not isinstance(value, bool):
                 return f"Parameter '{param_name}' must be a boolean, got {type(value).__name__}", {}
+            elif expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+                return f"Parameter '{param_name}' must be an integer, got {type(value).__name__}", {}
+            elif expected_type == "number" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                return f"Parameter '{param_name}' must be a number, got {type(value).__name__}", {}
             
             # Enum validation
             if "enum" in param_schema:
@@ -3612,7 +4392,7 @@ def handle_activate_window(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error activating window: {str(e)}", with_readme=True)
 
-def handle_scan_ui_elements(params: Dict) -> Dict:
+def handle_scan_ui_elements(params: Dict, session_key: object = None) -> Dict:
     """Handle scan_ui_elements operation."""
     try:
         # Extract parameters
@@ -3631,8 +4411,8 @@ def handle_scan_ui_elements(params: Dict) -> Dict:
         else:
             MCPLogger.log(TOOL_LOG_NAME, f"Processing scan_ui_elements: hwnd='{hwnd_str}'")
         
-        # Call the functional implementation
-        scan_result = scan_ui_elements_functional(window_title=window_title, hwnd_str=hwnd_str)
+        # Call the functional implementation (session_key isolates this caller's scanner)
+        scan_result = scan_ui_elements_functional(window_title=window_title, hwnd_str=hwnd_str, session_key=session_key)
         
         # Check for errors in the scan result
         if "error" in scan_result:
@@ -3658,13 +4438,13 @@ def handle_scan_ui_elements(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error scanning UI elements: {str(e)}", with_readme=True)
 
-def handle_get_clickable_elements(params: Dict) -> Dict:
+def handle_get_clickable_elements(params: Dict, session_key: object = None) -> Dict:
     """Handle get_clickable_elements operation."""
     try:
         MCPLogger.log(TOOL_LOG_NAME, "Processing get_clickable_elements")
         
-        # Call the functional implementation
-        clickable_result = get_clickable_elements_functional()
+        # Call the functional implementation (session_key selects this caller's own scan)
+        clickable_result = get_clickable_elements_functional(session_key=session_key)
         
         # Check for errors in the result
         if "error" in clickable_result:
@@ -3834,8 +4614,16 @@ def handle_move_window(params: Dict) -> Dict:
 def handle_system(input_param: Dict) -> Dict:
     """Handle system tool operations via MCP interface."""
     try:
-        # Pop off synthetic handler_info parameter early
-        handler_info = input_param.pop('handler_info', None)
+        # Read the synthetic handler_info from our own shallow copy via .get, so we never
+        # mutate the dict the server/caller passed in (the previous .pop mutated it in place).
+        if isinstance(input_param, dict):
+            input_param = dict(input_param)
+        handler_info = input_param.get('handler_info', None) if isinstance(input_param, dict) else None
+        # Per-caller key used to isolate this session's UI scanner from other concurrent callers'
+        session_scanner_key = handler_info.get('session_id') if isinstance(handler_info, dict) else None
+        # B6: the authenticated caller (or None when auth is not configured / internal call).
+        # Terminal sessions are owned by, and only reachable by, this user.
+        authenticated_user = get_authenticated_user(handler_info) if isinstance(handler_info, dict) else None
         
         if isinstance(input_param, dict) and "input" in input_param:
             input_param = input_param["input"]
@@ -3864,15 +4652,62 @@ def handle_system(input_param: Dict) -> Dict:
         # Extract operation
         operation = validated_params.get("operation")
         
+        # Gate GUI operations by the platforms that actually implement them, so an unsupported op
+        # returns a clear "not implemented on <os>" message instead of falling through to
+        # platform-specific code and raising an opaque "name 'win32gui' is not defined".
+        # platform.system() values: 'Windows', 'Darwin' (macOS), 'Linux'.
+        gui_operation_supported_platforms = {
+            "scan_ui_elements": {"Windows", "Darwin"},
+            "get_clickable_elements": {"Windows", "Darwin"},
+            "click_at_coordinates": {"Windows", "Darwin"},
+            "click_at_screen_coordinates": {"Windows", "Darwin"},
+            "send_text": {"Windows", "Darwin"},
+            "click_ui_element": {"Windows", "Darwin"},
+            "move_window": {"Windows", "Darwin", "Linux"},
+        }
+        operation_supported_platforms = gui_operation_supported_platforms.get(operation)
+        if operation_supported_platforms is not None and CURRENT_PLATFORM not in operation_supported_platforms:
+            supported_platforms_human_readable = ", ".join(sorted(operation_supported_platforms))
+            return create_error_response(
+                f"Operation '{operation}' is not implemented on {CURRENT_PLATFORM}; "
+                f"it is currently available on: {supported_platforms_human_readable}.",
+                with_readme=False,
+            )
+        
+        # B1-B4: optional operator security policy. High-blast-radius capabilities (arbitrary
+        # command execution, file read/write, keyboard/mouse injection, screen capture) can be
+        # individually disabled via settings[0].system_tool_security. Everything is allowed by
+        # default, so this is a no-op unless an operator opts in to locking the tool down.
+        capability_gate_by_operation = {
+            "execute_command": ("allow_command_execution", "arbitrary command execution"),
+            "write_file": ("allow_file_write", "file writing"),
+            "read_file": ("allow_file_read", "file reading"),
+            "send_text": ("allow_input_injection", "keyboard/text injection"),
+            "click_at_coordinates": ("allow_input_injection", "mouse click injection"),
+            "click_at_screen_coordinates": ("allow_input_injection", "mouse click injection"),
+            "click_ui_element": ("allow_input_injection", "mouse click injection"),
+            "take_screenshot": ("allow_screen_capture", "screen capture"),
+        }
+        gated_capability = capability_gate_by_operation.get(operation)
+        if gated_capability is not None:
+            capability_flag_name, human_readable_capability = gated_capability
+            if not _capability_is_allowed(_get_system_tool_security_policy(), capability_flag_name):
+                MCPLogger.log(TOOL_LOG_NAME, f"Operation '{operation}' refused by security policy ({capability_flag_name}=false)")
+                return create_error_response(
+                    f"Operation '{operation}' ({human_readable_capability}) is disabled by this server's "
+                    f"system_tool_security policy (settings[0].system_tool_security.{capability_flag_name}=false).",
+                    with_readme=False,
+                )
+        
         # Handle operations
         if operation == "list_windows":
             return handle_list_windows(validated_params)
         elif operation == "activate_window":
             return handle_activate_window(validated_params)
         elif operation == "scan_ui_elements":
-            return handle_scan_ui_elements(validated_params)
+            return handle_scan_ui_elements(validated_params, session_scanner_key)
         elif operation == "get_clickable_elements":
-            return handle_get_clickable_elements(validated_params)
+            return handle_get_clickable_elements(validated_params, session_scanner_key)
         elif operation == "move_window":
             return handle_move_window(validated_params)
         elif operation == "click_at_coordinates":
@@ -3888,13 +4723,13 @@ def handle_system(input_param: Dict) -> Dict:
         elif operation == "about":
             return handle_about(validated_params)
         elif operation == "execute_command":
-            return handle_execute_command(validated_params)
+            return handle_execute_command(validated_params, authenticated_user)
         elif operation == "read_output":
-            return handle_read_output(validated_params)
+            return handle_read_output(validated_params, authenticated_user)
         elif operation == "force_terminate":
-            return handle_force_terminate(validated_params)
+            return handle_force_terminate(validated_params, authenticated_user)
         elif operation == "list_sessions":
-            return handle_list_sessions(validated_params)
+            return handle_list_sessions(validated_params, authenticated_user)
         elif operation == "write_file":
             return handle_write_file(validated_params)
         elif operation == "read_file":
@@ -3967,10 +4802,29 @@ def handle_take_screenshot(params: Dict) -> Dict:
         
         if not hwnd:
             return create_error_response("Missing required parameter: hwnd", with_readme=False)
-            
+
+        # D4: reject a malformed region instead of silently capturing the whole window. The
+        # functional code only honors a region when len(region)==4, so a 3-element (or non-int)
+        # region would otherwise be dropped with no error. Require exactly [x, y, width, height]
+        # as four integers (bool excluded, matching this tool's other integer validation).
+        if region is not None:
+            if (not isinstance(region, (list, tuple)) or len(region) != 4 or
+                    any(isinstance(region_coordinate_value, bool) or not isinstance(region_coordinate_value, int)
+                        for region_coordinate_value in region)):
+                return create_error_response(
+                    "Parameter 'region' must be a list of exactly four integers [x, y, width, height].",
+                    with_readme=False,
+                )
+
+        # B4: screen capture can exfiltrate on-screen content to a network peer, so record that
+        # a capture happened (target window + output size) for auditability. Content is not logged.
+        MCPLogger.log(TOOL_LOG_NAME, f"Screen capture requested for window {hwnd} (region={region})")
+        
         success, message, base64_data = take_screenshot_functional(hwnd, filename, region)
         
         if success:
+            captured_bytes = len(base64_data) if base64_data else 0
+            MCPLogger.log(TOOL_LOG_NAME, f"Screen capture completed for window {hwnd} ({captured_bytes} base64 chars returned)")
             # # Use create_success_response with optional base64_image field
             # extra_fields = {}
             # if base64_data:
@@ -4034,6 +4888,7 @@ def handle_click_ui_element(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error handling click_ui_element: {e}", with_readme=False)
 
+@_ttl_cached_about_section
 def get_system_information_summary_and_full() -> Dict[str, any]:
     """Get comprehensive system information"""
     import platform
@@ -4058,6 +4913,7 @@ def get_system_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get system information: {e}"}
 
+@_ttl_cached_about_section
 def get_hardware_information_summary_and_full() -> Dict[str, any]:
     """Get hardware information"""
     import psutil
@@ -4103,6 +4959,7 @@ def get_hardware_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get hardware information: {e}"}
 
+@_ttl_cached_about_section
 def get_display_information_summary_and_full() -> Dict[str, any]:
     """Get comprehensive display/monitor information including layout, DPI, refresh rate, and physical properties.
     
@@ -4262,7 +5119,9 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                     # MDT_EFFECTIVE_DPI = 0 (effective DPI after system scaling)
                     # MDT_ANGULAR_DPI = 1 (DPI based on angular size)
                     # MDT_RAW_DPI = 2 (raw DPI from EDID)
-                    result = shcore.GetDpiForMonitor(hMonitor, 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
+                    # Pass the monitor handle as an int so the (now-declared) HMONITOR
+                    # argument is not truncated to 32 bits.
+                    result = shcore.GetDpiForMonitor(int(hMonitor), 0, ctypes.byref(dpi_x), ctypes.byref(dpi_y))
                     if result == 0:  # S_OK
                         display_data["dpi_x"] = dpi_x.value
                         display_data["dpi_y"] = dpi_y.value
@@ -4270,15 +5129,18 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
                         display_data["scale_factor_multiplier"] = round(dpi_x.value / 96.0, 2)
                 except Exception as e:
                     MCPLogger.log(TOOL_LOG_NAME, f"GetDpiForMonitor not available: {e}")
-                    # Fallback: get system DPI
+                    # Fallback: get system DPI. Use try/finally so the device context is always
+                    # released even if GetDeviceCaps (or the arithmetic) raises.
                     try:
                         hdc = win32gui.GetDC(0)
-                        dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
-                        win32gui.ReleaseDC(0, hdc)
-                        display_data["dpi_x"] = dpi
-                        display_data["dpi_y"] = dpi
-                        display_data["scale_factor_percent"] = int((dpi / 96.0) * 100)
-                        display_data["scale_factor_multiplier"] = round(dpi / 96.0, 2)
+                        try:
+                            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+                            display_data["dpi_x"] = dpi
+                            display_data["dpi_y"] = dpi
+                            display_data["scale_factor_percent"] = int((dpi / 96.0) * 100)
+                            display_data["scale_factor_multiplier"] = round(dpi / 96.0, 2)
+                        finally:
+                            win32gui.ReleaseDC(0, hdc)
                     except Exception:
                         pass
                 
@@ -4332,6 +5194,17 @@ def get_display_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get display information: {e}"}
 
+def _detect_current_process_is_elevated_admin() -> bool:
+    """Return True when the current process is running with elevated (administrator on
+    Windows, root on POSIX) privileges. Returns False on any error."""
+    try:
+        if IS_WINDOWS:
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        return hasattr(os, "geteuid") and os.geteuid() == 0
+    except Exception:
+        return False
+
+@_ttl_cached_about_section
 def get_user_and_security_information_summary_and_full() -> Dict[str, any]:
     """Get user and security context information"""
     import os
@@ -4342,12 +5215,17 @@ def get_user_and_security_information_summary_and_full() -> Dict[str, any]:
             "current_username": getpass.getuser(),
             "user_domain": os.environ.get('USERDOMAIN', 'Unknown'),
             "user_profile_path": os.environ.get('USERPROFILE', 'Unknown'),
-            "is_admin_process": os.environ.get('SESSIONNAME') == 'Console',  # Simplified check
-            "computer_domain": os.environ.get('COMPUTERNAME', 'Unknown')
+            # Fixed mislabels: the old "is_admin_process" actually tested SESSIONNAME=='Console'
+            # (an interactive-console check, not elevation), and "computer_domain" returned
+            # COMPUTERNAME (the machine name, not a domain).
+            "is_elevated_admin_process": _detect_current_process_is_elevated_admin(),
+            "is_interactive_console_session": os.environ.get('SESSIONNAME') == 'Console',
+            "computer_name": os.environ.get('COMPUTERNAME', 'Unknown')
         }
     except Exception as e:
         return {"error": f"Failed to get user information: {e}"}
 
+@_ttl_cached_about_section
 def get_performance_information_summary_and_full() -> Dict[str, any]:
     """Get current performance and resource usage"""
     import psutil
@@ -4387,6 +5265,7 @@ def get_performance_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get performance information: {e}"}
 
+@_ttl_cached_about_section
 def get_software_environment_summary_and_full() -> Dict[str, any]:
     """Get software environment information"""
     import os
@@ -4459,6 +5338,7 @@ def get_software_environment_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get software environment information: {e}"}
 
+@_ttl_cached_about_section
 def get_network_information_summary_and_full() -> Dict[str, any]:
     """Get network interface and connectivity information"""
     try:
@@ -4504,8 +5384,203 @@ def get_network_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get network information: {e}"}
 
+@_ttl_cached_about_section
 def get_installed_applications_summary_and_full() -> Dict[str, any]:
-    """Get comprehensive installed applications information with robust error handling for all Windows versions"""
+    """Get comprehensive installed applications information with robust error handling for all platforms"""
+    import subprocess
+    
+    # Platform-specific implementation
+    if IS_LINUX:
+        return get_installed_applications_linux()
+    elif IS_MACOS:
+        return get_installed_applications_macos()
+    elif IS_WINDOWS:
+        return get_installed_applications_windows()
+    else:
+        return {"error": f"Unsupported platform: {CURRENT_PLATFORM}"}
+
+def get_installed_applications_linux() -> Dict[str, any]:
+    """Linux-specific implementation for installed applications using dpkg, rpm, flatpak, snap"""
+    import subprocess
+    
+    try:
+        applications_info = {
+            "dpkg_packages": [],
+            "rpm_packages": [],
+            "flatpak_apps": [],
+            "snap_packages": [],
+            "total_dpkg_count": 0,
+            "total_rpm_count": 0,
+            "total_flatpak_count": 0,
+            "total_snap_count": 0,
+            "scan_errors": []
+        }
+        
+        # Try dpkg (Debian/Ubuntu/Raspberry Pi OS)
+        try:
+            MCPLogger.log(TOOL_LOG_NAME, "Scanning dpkg packages...")
+            result = subprocess.run(
+                ["dpkg-query", "-W", "-f=${Package}\t${Version}\t${Installed-Size}\t${Status}\n"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if not line:
+                      continue
+                    parts = line.split('\t')
+                    if len(parts) >= 4 and 'installed' in parts[3]:
+                        size_kb = 0
+                        try:
+                          size_kb = int(parts[2]) if parts[2].isdigit() else 0
+                        except:
+                          pass
+                        
+                        applications_info["dpkg_packages"].append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "size_kb": size_kb,
+                            "source": "dpkg"
+                        })
+                
+                applications_info["total_dpkg_count"] = len(applications_info["dpkg_packages"])
+                MCPLogger.log(TOOL_LOG_NAME, f"Found {applications_info['total_dpkg_count']} dpkg packages")
+        except FileNotFoundError:
+            MCPLogger.log(TOOL_LOG_NAME, "dpkg not available (not a Debian-based system)")
+        except Exception as e:
+            applications_info["scan_errors"].append(f"dpkg scan error: {e}")
+        
+        # Try rpm (RHEL/Fedora/CentOS)
+        try:
+            MCPLogger.log(TOOL_LOG_NAME, "Scanning rpm packages...")
+            result = subprocess.run(
+                ["rpm", "-qa", "--queryformat", "%{NAME}\t%{VERSION}-%{RELEASE}\t%{SIZE}\n"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if not line:
+                      continue
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        size_bytes = 0
+                        try:
+                          size_bytes = int(parts[2]) if parts[2].isdigit() else 0
+                        except:
+                          pass
+                        
+                        applications_info["rpm_packages"].append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "size_kb": size_bytes // 1024,
+                            "source": "rpm"
+                        })
+                
+                applications_info["total_rpm_count"] = len(applications_info["rpm_packages"])
+                MCPLogger.log(TOOL_LOG_NAME, f"Found {applications_info['total_rpm_count']} rpm packages")
+        except FileNotFoundError:
+            MCPLogger.log(TOOL_LOG_NAME, "rpm not available (not an RPM-based system)")
+        except Exception as e:
+            applications_info["scan_errors"].append(f"rpm scan error: {e}")
+        
+        # Try flatpak
+        try:
+            MCPLogger.log(TOOL_LOG_NAME, "Scanning flatpak apps...")
+            result = subprocess.run(
+                ["flatpak", "list", "--app", "--columns=name,version,application,size"],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines[1:]:  # Skip header
+                    if not line:
+                      continue
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        applications_info["flatpak_apps"].append({
+                            "name": parts[0],
+                            "version": parts[1] if len(parts) > 1 else "Unknown",
+                            "source": "flatpak"
+                        })
+                
+                applications_info["total_flatpak_count"] = len(applications_info["flatpak_apps"])
+                MCPLogger.log(TOOL_LOG_NAME, f"Found {applications_info['total_flatpak_count']} flatpak apps")
+        except FileNotFoundError:
+            MCPLogger.log(TOOL_LOG_NAME, "flatpak not available")
+        except Exception as e:
+            applications_info["scan_errors"].append(f"flatpak scan error: {e}")
+        
+        # Try snap
+        try:
+            MCPLogger.log(TOOL_LOG_NAME, "Scanning snap packages...")
+            result = subprocess.run(
+                ["snap", "list"],
+                capture_output=True,
+                text=True,
+                timeout=15
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                for line in lines[1:]:  # Skip header
+                    if not line:
+                      continue
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        applications_info["snap_packages"].append({
+                            "name": parts[0],
+                            "version": parts[1],
+                            "source": "snap"
+                        })
+                
+                applications_info["total_snap_count"] = len(applications_info["snap_packages"])
+                MCPLogger.log(TOOL_LOG_NAME, f"Found {applications_info['total_snap_count']} snap packages")
+        except FileNotFoundError:
+            MCPLogger.log(TOOL_LOG_NAME, "snap not available")
+        except Exception as e:
+            applications_info["scan_errors"].append(f"snap scan error: {e}")
+        
+        # Summary statistics
+        total_apps = (applications_info["total_dpkg_count"] + 
+                     applications_info["total_rpm_count"] + 
+                     applications_info["total_flatpak_count"] + 
+                     applications_info["total_snap_count"])
+        
+        applications_info["summary_stats"] = {
+            "total_applications": total_apps,
+            "dpkg_packages": applications_info["total_dpkg_count"],
+            "rpm_packages": applications_info["total_rpm_count"],
+            "flatpak_apps": applications_info["total_flatpak_count"],
+            "snap_packages": applications_info["total_snap_count"],
+            "scan_successful": len(applications_info["scan_errors"]) == 0
+        }
+        
+        return applications_info
+        
+    except Exception as e:
+        return {"error": f"Failed to get installed applications (Linux): {e}"}
+
+def get_installed_applications_macos() -> Dict[str, any]:
+    """macOS-specific implementation for installed applications"""
+    # TODO: Implement macOS application scanning
+    return {
+        "error": "macOS application scanning not yet implemented",
+        "summary_stats": {
+            "total_applications": 0,
+            "scan_successful": False
+        }
+    }
+
+def get_installed_applications_windows() -> Dict[str, any]:
+    """Windows-specific implementation for installed applications"""
     import winreg
     import subprocess
     
@@ -4644,6 +5719,7 @@ def get_installed_applications_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get installed applications: {e}"}
 
+@_ttl_cached_about_section
 def get_running_processes_summary_and_full() -> Dict[str, any]:
     """Get comprehensive running processes information for system diagnostics and troubleshooting"""
     try:
@@ -5192,8 +6268,147 @@ def handle_about_full_mode_with_warning(section: Optional[str]) -> Dict:
     )
 
 
+@_ttl_cached_about_section
 def get_browser_information_summary_and_full() -> Dict[str, any]:
     """Get comprehensive browser information including installed browsers and default browser settings"""
+    
+    # Platform-specific implementation
+    if IS_LINUX:
+        return get_browser_information_linux()
+    elif IS_MACOS:
+        return get_browser_information_macos()
+    elif IS_WINDOWS:
+        return get_browser_information_windows()
+    else:
+        return {"error": f"Unsupported platform: {CURRENT_PLATFORM}"}
+
+def get_browser_information_linux() -> Dict[str, any]:
+    """Linux-specific implementation for browser detection"""
+    import subprocess
+    
+    try:
+        browser_info = {
+            "installed_browsers": [],
+            "default_browser": "Unknown",
+            "browser_paths": {},
+            "scan_errors": []
+        }
+        
+        # Common Linux browser paths
+        browser_patterns = {
+            "Google Chrome": [
+                "/usr/bin/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/opt/google/chrome/google-chrome"
+            ],
+            "Chromium": [
+                "/usr/bin/chromium",
+                "/usr/bin/chromium-browser",
+                "/snap/bin/chromium"
+            ],
+            "Mozilla Firefox": [
+                "/usr/bin/firefox",
+                "/usr/lib/firefox/firefox",
+                "/snap/bin/firefox"
+            ],
+            "Firefox ESR": [
+                "/usr/bin/firefox-esr"
+            ],
+            "Opera": [
+                "/usr/bin/opera",
+                "/usr/lib/x86_64-linux-gnu/opera/opera"
+            ],
+            "Brave": [
+                "/usr/bin/brave-browser",
+                "/usr/bin/brave",
+                "/opt/brave.com/brave/brave-browser"
+            ],
+            "Microsoft Edge": [
+                "/usr/bin/microsoft-edge",
+                "/usr/bin/microsoft-edge-stable"
+            ],
+            "Vivaldi": [
+                "/usr/bin/vivaldi",
+                "/usr/bin/vivaldi-stable"
+            ]
+        }
+        
+        # Detect installed browsers
+        for browser_name, paths in browser_patterns.items():
+            browser_found = False
+            browser_path = None
+            
+            for path in paths:
+                if os.path.exists(path):
+                    browser_found = True
+                    browser_path = path
+                    break
+            
+            if browser_found:
+                browser_data = {
+                    "name": browser_name,
+                    "path": browser_path,
+                    "version": "Unknown"
+                }
+                
+                # Try to get version
+                try:
+                    version_result = subprocess.run(
+                        [browser_path, "--version"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if version_result.returncode == 0:
+                        browser_data["version"] = version_result.stdout.strip()
+                except Exception as e:
+                    browser_info["scan_errors"].append(f"Version detection error for {browser_name}: {e}")
+                
+                browser_info["installed_browsers"].append(browser_data)
+                browser_info["browser_paths"][browser_name] = browser_path
+        
+        # Get default browser using xdg-settings (if available)
+        try:
+            result = subprocess.run(
+                ["xdg-settings", "get", "default-web-browser"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                browser_info["default_browser"] = result.stdout.strip()
+        except FileNotFoundError:
+            browser_info["scan_errors"].append("xdg-settings not available")
+        except Exception as e:
+            browser_info["scan_errors"].append(f"Default browser detection error: {e}")
+        
+        # Usage statistics
+        browser_info["usage_stats"] = {
+            "total_browsers_found": len(browser_info["installed_browsers"]),
+            "browsers_with_versions": len([b for b in browser_info["installed_browsers"] if b["version"] != "Unknown"]),
+            "scan_successful": len(browser_info["scan_errors"]) == 0
+        }
+        
+        return browser_info
+        
+    except Exception as e:
+        return {"error": f"Failed to get browser information (Linux): {e}"}
+
+def get_browser_information_macos() -> Dict[str, any]:
+    """macOS-specific implementation for browser detection"""
+    # TODO: Implement macOS browser detection
+    return {
+        "error": "macOS browser detection not yet implemented",
+        "usage_stats": {
+            "total_browsers_found": 0,
+            "scan_successful": False
+        }
+    }
+
+def get_browser_information_windows() -> Dict[str, any]:
+    """Windows-specific implementation for browser detection"""
+    import subprocess
+    import winreg
     
     try:
         browser_info = {
@@ -5356,7 +6571,7 @@ def get_browser_information_summary_and_full() -> Dict[str, any]:
     except Exception as e:
         return {"error": f"Failed to get browser information: {e}"}
 
-def handle_execute_command(params: Dict) -> Dict:
+def handle_execute_command(params: Dict, requesting_user: Optional[str] = None) -> Dict:
     """Handle execute_command operation"""
     try:
         command = params.get('command')
@@ -5366,9 +6581,9 @@ def handle_execute_command(params: Dict) -> Dict:
         if not command:
             return create_error_response("Missing required parameter: command", with_readme=False)
             
-        MCPLogger.log(TOOL_LOG_NAME, f"Processing execute_command: command='{command[:50]}...', timeout_ms={timeout_ms}")
+        MCPLogger.log(TOOL_LOG_NAME, f"Processing execute_command: command={_redact_sensitive_for_log(command)}, timeout_ms={timeout_ms}")
         
-        result = execute_command_functional(command, timeout_ms, shell)
+        result = execute_command_functional(command, timeout_ms, shell, owner_user=requesting_user)
         
         if result['success']:
             response_text = f"Command executed successfully\n"
@@ -5391,7 +6606,7 @@ def handle_execute_command(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error handling execute_command: {e}", with_readme=False)
 
-def handle_read_output(params: Dict) -> Dict:
+def handle_read_output(params: Dict, requesting_user: Optional[str] = None) -> Dict:
     """Handle read_output operation"""
     try:
         session_id = params.get('session_id')
@@ -5402,7 +6617,7 @@ def handle_read_output(params: Dict) -> Dict:
             
         MCPLogger.log(TOOL_LOG_NAME, f"Processing read_output: session_id={session_id}, timeout_ms={timeout_ms}")
         
-        result = read_output_functional(session_id, timeout_ms)
+        result = read_output_functional(session_id, timeout_ms, requesting_user=requesting_user)
         
         if result['success']:
             response_text = f"Output from session {session_id}:\n"
@@ -5428,7 +6643,7 @@ def handle_read_output(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error handling read_output: {e}", with_readme=False)
 
-def handle_force_terminate(params: Dict) -> Dict:
+def handle_force_terminate(params: Dict, requesting_user: Optional[str] = None) -> Dict:
     """Handle force_terminate operation"""
     try:
         session_id = params.get('session_id')
@@ -5438,7 +6653,7 @@ def handle_force_terminate(params: Dict) -> Dict:
             
         MCPLogger.log(TOOL_LOG_NAME, f"Processing force_terminate: session_id={session_id}")
         
-        result = force_terminate_functional(session_id)
+        result = force_terminate_functional(session_id, requesting_user=requesting_user)
         
         if result['success']:
             return {
@@ -5452,12 +6667,12 @@ def handle_force_terminate(params: Dict) -> Dict:
     except Exception as e:
         return create_error_response(f"Error handling force_terminate: {e}", with_readme=False)
 
-def handle_list_sessions(params: Dict) -> Dict:
+def handle_list_sessions(params: Dict, requesting_user: Optional[str] = None) -> Dict:
     """Handle list_sessions operation"""
     try:
         MCPLogger.log(TOOL_LOG_NAME, "Processing list_sessions")
         
-        result = list_sessions_functional()
+        result = list_sessions_functional(requesting_user=requesting_user)
         
         if result['success']:
             sessions = result['active_sessions']
@@ -5509,9 +6724,358 @@ def handle_list_sessions(params: Dict) -> Dict:
 # Basic operations like listing apps and screenshots work without special permissions.
 
 if IS_MACOS:
+    # ------------------------------------------------------------------
+    # macOS shared helpers (window lookup, Accessibility API, CGEvent)
+    # ------------------------------------------------------------------
+
+    def macos_accessibility_permission_is_granted() -> bool:
+        """Return True when THIS process has been granted macOS Accessibility permission.
+
+        Window listing and screenshots work without it, but moving windows, injecting
+        clicks/keys, and walking the UI-element (AX) tree of OTHER apps require the user to
+        tick this process under System Settings > Privacy & Security > Accessibility.
+        AXIsProcessTrusted() reports the current grant state without prompting."""
+        if not MACOS_HAS_ACCESSIBILITY_API:
+            return False
+        try:
+            return bool(macos_accessibility_services_module.AXIsProcessTrusted())
+        except Exception:
+            return False
+
+    _MACOS_ACCESSIBILITY_PERMISSION_HINT = (
+        "macOS Accessibility permission is required for this operation. Grant it under "
+        "System Settings > Privacy & Security > Accessibility for the application that runs "
+        "this server (e.g. aura / Terminal), then retry."
+    )
+
+    def _macos_parse_window_identifier(hwnd_str: str) -> Dict[str, object]:
+        """Interpret the tool's cross-platform 'hwnd' string for macOS targets.
+
+        Accepts, in priority order:
+          - a CoreGraphics window number as decimal ("12345") or hex ("0x3039")
+            -> {"kind": "window_id", "window_id": int}
+          - the legacy pseudo-handle "macos_app_<index>_<AppName>" produced by older builds
+            -> {"kind": "app_name", "app_name": str}
+          - "pid:<n>" -> {"kind": "pid", "pid": int}
+          - anything else is treated as a literal application name
+            -> {"kind": "app_name", "app_name": str}
+        """
+        raw = (hwnd_str or "").strip()
+        if raw.startswith("macos_app_"):
+            parts = raw.split("_", 3)
+            if len(parts) >= 4:
+                return {"kind": "app_name", "app_name": parts[3]}
+        if raw.lower().startswith("pid:"):
+            try:
+                return {"kind": "pid", "pid": int(raw.split(":", 1)[1])}
+            except ValueError:
+                pass
+        try:
+            if raw.lower().startswith("0x"):
+                return {"kind": "window_id", "window_id": int(raw, 16)}
+            return {"kind": "window_id", "window_id": int(raw, 10)}
+        except ValueError:
+            pass
+        return {"kind": "app_name", "app_name": raw}
+
+    def _macos_copy_onscreen_window_records() -> List[Dict[str, object]]:
+        """Return normalized dicts for the current on-screen windows via CGWindowList.
+
+        Each record: {window_id, title, app_name, pid, layer, x, y, width, height, is_onscreen}.
+        Title is often '' unless the user has granted Screen Recording permission - callers
+        must not depend on it being populated."""
+        if not MACOS_HAS_QUARTZ:
+            return []
+        Q = macos_quartz_module
+        try:
+            options = Q.kCGWindowListOptionOnScreenOnly | Q.kCGWindowListExcludeDesktopElements
+            raw_windows = Q.CGWindowListCopyWindowInfo(options, Q.kCGNullWindowID) or []
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"CGWindowListCopyWindowInfo failed: {e}")
+            return []
+        records = []
+        for entry in raw_windows:
+            try:
+                bounds = entry.get('kCGWindowBounds') or {}
+                records.append({
+                    "window_id": int(entry.get('kCGWindowNumber', 0)),
+                    "title": entry.get('kCGWindowName') or "",
+                    "app_name": entry.get('kCGWindowOwnerName') or "",
+                    "pid": int(entry.get('kCGWindowOwnerPID', 0)),
+                    "layer": int(entry.get('kCGWindowLayer', 0)),
+                    "x": int(bounds.get('X', 0)),
+                    "y": int(bounds.get('Y', 0)),
+                    "width": int(bounds.get('Width', 0)),
+                    "height": int(bounds.get('Height', 0)),
+                    "is_onscreen": bool(entry.get('kCGWindowIsOnscreen', False)),
+                })
+            except Exception:
+                continue
+        return records
+
+    def _macos_find_window_record(window_id: int) -> Optional[Dict[str, object]]:
+        """Return the on-screen window record for a CoreGraphics window number, or None."""
+        for record in _macos_copy_onscreen_window_records():
+            if record["window_id"] == window_id:
+                return record
+        return None
+
+    def _macos_resolve_target_pid_and_appname(hwnd_str: str) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, object]]]:
+        """Map a tool 'hwnd' to (pid, app_name, window_record) for macOS operations.
+
+        For a window_id we look the window up in CGWindowList to recover its owner pid and the
+        window's current bounds/title (window_record). For an app_name/pid we return what we
+        can (window_record is None)."""
+        identifier = _macos_parse_window_identifier(hwnd_str)
+        if identifier["kind"] == "window_id":
+            record = _macos_find_window_record(int(identifier["window_id"]))
+            if record is not None:
+                return int(record["pid"]), (record["app_name"] or None), record
+            return None, None, None
+        if identifier["kind"] == "pid":
+            pid = int(identifier["pid"])
+            app_name = None
+            if MACOS_HAS_QUARTZ:
+                try:
+                    running = macos_appkit_module.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+                    if running is not None:
+                        app_name = running.localizedName()
+                except Exception:
+                    pass
+            return pid, app_name, None
+        # app_name: try to resolve a pid from the running applications list
+        app_name = str(identifier.get("app_name") or "")
+        if MACOS_HAS_QUARTZ and app_name:
+            try:
+                for running in macos_appkit_module.NSWorkspace.sharedWorkspace().runningApplications():
+                    localized = running.localizedName() or ""
+                    if localized.lower() == app_name.lower():
+                        return int(running.processIdentifier()), localized, None
+            except Exception:
+                pass
+        return None, (app_name or None), None
+
+    def _macos_activate_pid(pid: int) -> bool:
+        """Bring the application owning pid to the foreground (no Automation permission needed)."""
+        if not MACOS_HAS_QUARTZ or not pid:
+            return False
+        try:
+            running = macos_appkit_module.NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if running is None:
+                return False
+            # NSApplicationActivateIgnoringOtherApps == 1 << 1
+            running.activateWithOptions_(1 << 1)
+            return True
+        except Exception as e:
+            MCPLogger.log(TOOL_LOG_NAME, f"NSRunningApplication activate failed for pid {pid}: {e}")
+            return False
+
+    def _macos_button_to_cg_events(button: str):
+        """Map a 'left'/'right'/'middle' button name to (down_event, up_event, cg_button)."""
+        Q = macos_quartz_module
+        table = {
+            "left": (Q.kCGEventLeftMouseDown, Q.kCGEventLeftMouseUp, Q.kCGMouseButtonLeft),
+            "right": (Q.kCGEventRightMouseDown, Q.kCGEventRightMouseUp, Q.kCGMouseButtonRight),
+            "middle": (Q.kCGEventOtherMouseDown, Q.kCGEventOtherMouseUp, Q.kCGMouseButtonCenter),
+        }
+        return table.get(button)
+
+    def _macos_post_mouse_click_at_global_point(global_x: int, global_y: int, button: str = "left", double: bool = False) -> Tuple[bool, str]:
+        """Synthesize a mouse click at absolute screen coordinates using CGEvent (HID tap)."""
+        if not MACOS_HAS_QUARTZ:
+            return False, "Quartz is unavailable; cannot synthesize mouse input on this macOS build."
+        mapped = _macos_button_to_cg_events(button)
+        if mapped is None:
+            return False, f"Invalid button: {button}. Must be 'left', 'right', or 'middle'."
+        down_event_type, up_event_type, cg_button = mapped
+        Q = macos_quartz_module
+        try:
+            point = Q.CGPoint(float(global_x), float(global_y))
+            # Remember the current cursor location so we can restore it afterwards.
+            previous_point = None
+            try:
+                previous_point = Q.CGEventGetLocation(Q.CGEventCreate(None))
+            except Exception:
+                previous_point = None
+            move_event = Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, point, cg_button)
+            Q.CGEventPost(Q.kCGHIDEventTap, move_event)
+            click_count = 2 if double else 1
+            for current_click_index in range(click_count):
+                down_event = Q.CGEventCreateMouseEvent(None, down_event_type, point, cg_button)
+                up_event = Q.CGEventCreateMouseEvent(None, up_event_type, point, cg_button)
+                # click state (1 for single, 2 for the second of a double) so apps see a real double-click
+                Q.CGEventSetIntegerValueField(down_event, Q.kCGMouseEventClickState, current_click_index + 1)
+                Q.CGEventSetIntegerValueField(up_event, Q.kCGMouseEventClickState, current_click_index + 1)
+                Q.CGEventPost(Q.kCGHIDEventTap, down_event)
+                time.sleep(0.02)
+                Q.CGEventPost(Q.kCGHIDEventTap, up_event)
+                time.sleep(0.02)
+            if previous_point is not None:
+                try:
+                    restore_event = Q.CGEventCreateMouseEvent(None, Q.kCGEventMouseMoved, previous_point, cg_button)
+                    Q.CGEventPost(Q.kCGHIDEventTap, restore_event)
+                except Exception:
+                    pass
+            return True, f"Clicked {button} button at screen ({global_x}, {global_y})"
+        except Exception as e:
+            return False, f"Error posting mouse click: {e}"
+
+    def _macos_ax_copy_attribute(ax_element, attribute_name):
+        """Read one AX attribute, returning the value or None (never raising)."""
+        if not MACOS_HAS_ACCESSIBILITY_API or ax_element is None:
+            return None
+        try:
+            error_code, value = macos_accessibility_services_module.AXUIElementCopyAttributeValue(ax_element, attribute_name, None)
+            if error_code == macos_accessibility_services_module.kAXErrorSuccess:
+                return value
+        except Exception:
+            pass
+        return None
+
+    def _macos_ax_attribute_as_text(ax_element, attribute_name) -> str:
+        """Read an AX attribute and coerce it to a short display string ('' if absent)."""
+        value = _macos_ax_copy_attribute(ax_element, attribute_name)
+        if value is None:
+            return ""
+        try:
+            return str(value)
+        except Exception:
+            return ""
+
+    def _macos_ax_element_bounds(ax_element) -> Tuple[int, int, int, int]:
+        """Return (x, y, width, height) in global screen pixels for an AX element (zeros if unknown)."""
+        AX = macos_accessibility_services_module
+        x = y = width = height = 0
+        position_value = _macos_ax_copy_attribute(ax_element, AX.kAXPositionAttribute)
+        size_value = _macos_ax_copy_attribute(ax_element, AX.kAXSizeAttribute)
+        if position_value is not None:
+            try:
+                ok, point = AX.AXValueGetValue(position_value, AX.kAXValueCGPointType, None)
+                if ok:
+                    x, y = int(point.x), int(point.y)
+            except Exception:
+                pass
+        if size_value is not None:
+            try:
+                ok, size = AX.AXValueGetValue(size_value, AX.kAXValueCGSizeType, None)
+                if ok:
+                    width, height = int(size.width), int(size.height)
+            except Exception:
+                pass
+        return x, y, width, height
+
+    def _macos_ax_windows_for_pid(pid: int) -> List[object]:
+        """Return the AX window elements owned by an application pid (empty on error/no permission)."""
+        if not MACOS_HAS_ACCESSIBILITY_API or not pid:
+            return []
+        AX = macos_accessibility_services_module
+        try:
+            app_element = AX.AXUIElementCreateApplication(pid)
+        except Exception:
+            return []
+        windows = _macos_ax_copy_attribute(app_element, AX.kAXWindowsAttribute)
+        if not windows:
+            return []
+        try:
+            return list(windows)
+        except Exception:
+            return []
+
+    def _macos_ax_best_matching_window_element(pid: int, target_record: Optional[Dict[str, object]]):
+        """Pick the AX window element that best matches a CGWindow record (by title, then bounds).
+
+        AX does not expose the CGWindow number, so we correlate on the title when available and
+        otherwise on the closest position/size. Falls back to the app's main window, then its
+        first window."""
+        ax_windows = _macos_ax_windows_for_pid(pid)
+        if not ax_windows:
+            return None
+        if target_record is not None:
+            target_title = str(target_record.get("title") or "")
+            if target_title:
+                for window_element in ax_windows:
+                    if _macos_ax_attribute_as_text(window_element, macos_accessibility_services_module.kAXTitleAttribute) == target_title:
+                        return window_element
+            target_x = int(target_record.get("x", 0))
+            target_y = int(target_record.get("y", 0))
+            target_w = int(target_record.get("width", 0))
+            target_h = int(target_record.get("height", 0))
+            best_window_element = None
+            best_distance = None
+            for window_element in ax_windows:
+                wx, wy, ww, wh = _macos_ax_element_bounds(window_element)
+                distance = abs(wx - target_x) + abs(wy - target_y) + abs(ww - target_w) + abs(wh - target_h)
+                if best_distance is None or distance < best_distance:
+                    best_distance = distance
+                    best_window_element = window_element
+            if best_window_element is not None:
+                return best_window_element
+        AX = macos_accessibility_services_module
+        app_element = AX.AXUIElementCreateApplication(pid)
+        main_window = _macos_ax_copy_attribute(app_element, AX.kAXMainWindowAttribute)
+        if main_window is not None:
+            return main_window
+        return ax_windows[0]
+
     def list_windows_functional(include_all: bool = False) -> List[Dict]:
-      """macOS implementation using AppleScript to list running applications.
-      
+      """macOS implementation: enumerate real on-screen windows via CoreGraphics (CGWindowList).
+
+      Returns one entry per on-screen window (not just per app), including the CoreGraphics
+      window number as 'hwnd' (decimal string), the owning application, pid, and the window's
+      screen position and size - the same shape the Windows implementation returns so the shared
+      handlers, activate_window, move_window, take_screenshot and click ops can target it.
+
+      Note: window titles are only populated when the user has granted Screen Recording
+      permission; without it 'title' is '' but all other fields still work. Minimized/hidden
+      windows are not reported by CGWindowList (there is no reliable public API for their bounds).
+
+      Args:
+        include_all: If True, include helper/menu/overlay windows (non-zero window layers) and
+          zero-size windows; if False (default) only normal application windows (layer 0 with a
+          real size) are returned.
+
+      Returns:
+        List of window dictionaries with comprehensive properties
+      """
+      if not MACOS_HAS_QUARTZ:
+        MCPLogger.log(TOOL_LOG_NAME, "Quartz unavailable - falling back to AppleScript application listing")
+        return _macos_legacy_list_windows_via_applescript(include_all=include_all)
+      try:
+        records = _macos_copy_onscreen_window_records()
+        windows = []
+        for record in records:
+          is_normal_app_window = (record["layer"] == 0 and record["width"] >= 1 and record["height"] >= 1)
+          if not include_all and not is_normal_app_window:
+            continue
+          windows.append({
+            'hwnd': str(record["window_id"]),
+            'title': record["title"],
+            'class': record["app_name"],
+            'x': record["x"],
+            'y': record["y"],
+            'width': record["width"],
+            'height': record["height"],
+            'style_flags': {},
+            'process_id': record["pid"],
+            'process_name': record["app_name"],
+            'process_exe': record["app_name"],
+            'is_visible': record["is_onscreen"],
+            'is_minimized': False,
+            'is_maximized': False,
+            'window_layer': record["layer"],
+            'app_name': record["app_name"],
+          })
+        windows.sort(key=lambda w: (w['class'].lower(), w['title'].lower()))
+        MCPLogger.log(TOOL_LOG_NAME, f"macOS window enumeration: {len(windows)} windows (include_all={include_all})")
+        return windows
+      except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"Error in macOS list_windows_functional: {e} - falling back to AppleScript")
+        return _macos_legacy_list_windows_via_applescript(include_all=include_all)
+
+    def _macos_legacy_list_windows_via_applescript(include_all: bool = False) -> List[Dict]:
+      """macOS fallback: list running applications via AppleScript (used only when Quartz is
+      unavailable).
+
       Note: On macOS, this returns application-level information rather than individual windows
       unless Accessibility permissions are granted. Each entry represents a running application.
       
@@ -5579,144 +7143,636 @@ if IS_MACOS:
         return []
     
     def activate_window_functional(hwnd_str: str, request_focus: bool = False) -> Tuple[bool, str]:
-      """macOS implementation for activating/focusing an application.
-      
-      Note: This uses AppleScript to activate applications. The hwnd_str should be an app name
-      or the pseudo-handle returned by list_windows_functional.
-      
+      """macOS implementation: bring the target window's application to the foreground.
+
+      macOS activates at the application level, not per-window, so this focuses the app that
+      owns the given window. Accepts any handle form list_windows returns (a CoreGraphics
+      window-number string), plus 'pid:<n>' or a literal application name.
+
       Args:
-        hwnd_str: Application name or pseudo-handle from list_windows
-        request_focus: Whether to activate the application (True) or just bring to front
-        
+        hwnd_str: Window-number handle from list_windows, 'pid:<n>', or an application name
+        request_focus: Accepted for signature parity with Windows (macOS always focuses the app)
+
       Returns:
         Tuple of (success, message)
       """
       try:
-        # Extract app name from pseudo-handle if needed
-        app_name = hwnd_str
-        if hwnd_str.startswith('macos_app_'):
-          # Extract app name from pseudo-handle format: macos_app_<idx>_<name>
-          parts = hwnd_str.split('_', 3)
-          if len(parts) >= 4:
-            app_name = parts[3]
-        
-        # Use AppleScript to activate the application
-        MCPLogger.log(TOOL_LOG_NAME, f"Activating macOS application: {app_name}")
-        script = f'tell application "{app_name}" to activate'
+        pid, app_name, _record = _macos_resolve_target_pid_and_appname(hwnd_str)
+
+        # Preferred path: activate by pid via NSRunningApplication (no Automation permission).
+        if pid:
+          MCPLogger.log(TOOL_LOG_NAME, f"Activating macOS pid {pid} ({app_name or 'unknown app'})")
+          if _macos_activate_pid(pid):
+            return True, f"Successfully activated application '{app_name or pid}'"
+
+        # Fallback path: activate by name via AppleScript (may need Automation permission).
+        if not app_name:
+          return False, f"Could not resolve a macOS application to activate from handle '{hwnd_str}'"
+        MCPLogger.log(TOOL_LOG_NAME, f"Activating macOS application by name via AppleScript: {app_name}")
         result = subprocess.run(
-          ['osascript', '-e', script],
-          capture_output=True,
-          text=True,
-          timeout=5
+          ['osascript', '-e', f'tell application "{app_name}" to activate'],
+          capture_output=True, text=True, timeout=5
         )
-        
         if result.returncode == 0:
-          MCPLogger.log(TOOL_LOG_NAME, f"Successfully activated application: {app_name}")
           return True, f"Successfully activated application '{app_name}'"
-        else:
-          error_msg = result.stderr.strip()
-          MCPLogger.log(TOOL_LOG_NAME, f"Error activating application {app_name}: {error_msg}")
-          return False, f"Failed to activate application '{app_name}': {error_msg}"
-          
+        error_msg = result.stderr.strip()
+        MCPLogger.log(TOOL_LOG_NAME, f"Error activating application {app_name}: {error_msg}")
+        return False, f"Failed to activate application '{app_name}': {error_msg}"
+
       except subprocess.TimeoutExpired:
         return False, f"Timeout while trying to activate application"
       except Exception as e:
         return False, f"Error activating application: {e}"
+
+    def move_window_functional(hwnd_str: str, x: int, y: int, width: int, height: int) -> Tuple[bool, str]:
+      """macOS implementation: move and resize a window via the Accessibility (AX) API.
+
+      Requires macOS Accessibility permission. Because AX does not expose CoreGraphics window
+      numbers, the target AX window is correlated with the requested window by title (when
+      available) and otherwise by closest current position/size.
+
+      Args:
+        hwnd_str: Window-number handle from list_windows (or 'pid:<n>' / app name)
+        x, y: New top-left position in global screen pixels
+        width, height: New size in pixels
+
+      Returns:
+        Tuple of (success, message)
+      """
+      if not MACOS_HAS_ACCESSIBILITY_API:
+        return False, "ApplicationServices (AX API) is unavailable; cannot move windows on this macOS build."
+      if not macos_accessibility_permission_is_granted():
+        return False, _MACOS_ACCESSIBILITY_PERMISSION_HINT
+      if width <= 0 or height <= 0:
+        return False, f"Invalid dimensions: width={width}, height={height}. Both must be positive."
+      try:
+        pid, app_name, record = _macos_resolve_target_pid_and_appname(hwnd_str)
+        if not pid:
+          return False, f"Could not resolve a macOS application/window from handle '{hwnd_str}'"
+        window_element = _macos_ax_best_matching_window_element(pid, record)
+        if window_element is None:
+          return False, f"No AX window found for application '{app_name or pid}' (handle '{hwnd_str}')"
+        AX = macos_accessibility_services_module
+        Q = macos_quartz_module
+        position_value = AX.AXValueCreate(AX.kAXValueCGPointType, Q.CGPoint(float(x), float(y)))
+        size_value = AX.AXValueCreate(AX.kAXValueCGSizeType, Q.CGSize(float(width), float(height)))
+        position_error = AX.AXUIElementSetAttributeValue(window_element, AX.kAXPositionAttribute, position_value)
+        size_error = AX.AXUIElementSetAttributeValue(window_element, AX.kAXSizeAttribute, size_value)
+        if position_error != AX.kAXErrorSuccess or size_error != AX.kAXErrorSuccess:
+          return False, f"AX set position/size failed (position err={position_error}, size err={size_error}); the window may not be resizable."
+        MCPLogger.log(TOOL_LOG_NAME, f"Moved macOS window (pid {pid}) to ({x},{y}) size {width}x{height}")
+        return True, f"Window for '{app_name or pid}' moved to ({x}, {y}) and resized to {width}x{height}"
+      except Exception as e:
+        return False, f"Error moving macOS window: {e}"
+
+    def click_at_coordinates_functional(hwnd_str: str, x: int, y: int, button: str = "left") -> Tuple[bool, str]:
+      """macOS implementation: click at window-relative coordinates via CGEvent.
+
+      The window's current on-screen origin (from CGWindowList) is added to the given offset, so
+      (x, y) are relative to the target window's top-left. Negative x/y count back from the
+      window's right/bottom edge, matching the Windows implementation. Posting synthetic clicks
+      requires macOS Accessibility permission.
+
+      Args:
+        hwnd_str: Window-number handle from list_windows
+        x, y: Coordinates relative to the window (negative = from right/bottom edge)
+        button: 'left', 'right', or 'middle'
+
+      Returns:
+        Tuple of (success, message)
+      """
+      if not MACOS_HAS_QUARTZ:
+        return False, "Quartz is unavailable; cannot synthesize mouse input on this macOS build."
+      if not macos_accessibility_permission_is_granted():
+        return False, _MACOS_ACCESSIBILITY_PERMISSION_HINT
+      identifier = _macos_parse_window_identifier(hwnd_str)
+      if identifier["kind"] != "window_id":
+        return False, ("click_at_coordinates needs a window handle from list_windows (a window "
+                       "number). Use click_at_screen_coordinates for absolute screen clicks.")
+      record = _macos_find_window_record(int(identifier["window_id"]))
+      if record is None:
+        return False, f"Window {identifier['window_id']} is not currently on screen."
+      # Bring the owning app forward so the click lands on the intended window.
+      if record["pid"]:
+        _macos_activate_pid(int(record["pid"]))
+        time.sleep(0.15)
+      window_x, window_y = int(record["x"]), int(record["y"])
+      window_width, window_height = int(record["width"]), int(record["height"])
+      global_x = window_x + (window_width + x if x < 0 else x)
+      global_y = window_y + (window_height + y if y < 0 else y)
+      success, message = _macos_post_mouse_click_at_global_point(global_x, global_y, button)
+      if success:
+        MCPLogger.log(TOOL_LOG_NAME, f"Clicked {button} at window-relative ({x},{y}) = screen ({global_x},{global_y})")
+        return True, f"Successfully clicked {button} button at window coordinates ({x}, {y}) [screen ({global_x}, {global_y})]"
+      return False, message
+
+    def click_at_screen_coordinates_functional(x: int, y: int, button: str = "left") -> Tuple[bool, str]:
+      """macOS implementation: click at absolute screen coordinates via CGEvent.
+
+      Posting synthetic clicks requires macOS Accessibility permission.
+
+      Args:
+        x, y: Absolute screen coordinates
+        button: 'left', 'right', or 'middle'
+
+      Returns:
+        Tuple of (success, message)
+      """
+      if not MACOS_HAS_QUARTZ:
+        return False, "Quartz is unavailable; cannot synthesize mouse input on this macOS build."
+      if not macos_accessibility_permission_is_granted():
+        return False, _MACOS_ACCESSIBILITY_PERMISSION_HINT
+      success, message = _macos_post_mouse_click_at_global_point(int(x), int(y), button)
+      if success:
+        MCPLogger.log(TOOL_LOG_NAME, f"Clicked {button} at screen ({x},{y})")
+        return True, f"Successfully clicked {button} button at screen coordinates ({x}, {y})"
+      return False, message
     
     def take_screenshot_functional(hwnd_str: str, filename: Optional[str] = None, region: Optional[List[int]] = None) -> Tuple[bool, str, Optional[str]]:
-      """macOS implementation using screencapture command.
-      
-      Note: On macOS, screenshots are typically taken of the entire screen or specific windows
-      by window ID. The screencapture command provides this functionality.
-      
+      """macOS implementation using the screencapture command.
+
+      When hwnd_str resolves to a CoreGraphics window number (as returned by list_windows), a
+      window-specific capture is taken with `screencapture -l<id>`; otherwise the whole main
+      display is captured. An optional region [x, y, width, height] (relative to the captured
+      image, negative offsets counting from the right/bottom, zero meaning 'to the edge') is
+      cropped from the result with PIL when available.
+
+      Note: capturing another application's window content requires the user to have granted
+      Screen Recording permission to the process running this server; without it macOS returns a
+      blank/desktop image rather than an error.
+
       Args:
-        hwnd_str: Window/app identifier (currently takes full screen screenshot)
-        filename: Optional filename to save screenshot to
-        region: Optional region [x, y, width, height] (not yet implemented for macOS)
-        
+        hwnd_str: Window-number handle from list_windows (falls back to full screen otherwise)
+        filename: Optional path to save the PNG to (returned inline as base64 when omitted)
+        region: Optional [x, y, width, height] sub-rectangle to crop from the capture
+
       Returns:
         Tuple of (success, message, base64_image_data)
       """
+      temp_file = None
       try:
-        # For now, we'll take a full screen screenshot
-        # TODO: Implement window-specific screenshots using window IDs from CGWindowListCopyWindowInfo
-        
-        if region is not None:
-          # Region-based screenshots could be implemented with -R flag
-          MCPLogger.log(TOOL_LOG_NAME, "Warning: Region-based screenshots not yet implemented for macOS")
-        
-        # Create a temporary file if no filename specified
-        temp_file = None
-        if not filename:
+        identifier = _macos_parse_window_identifier(hwnd_str) if hwnd_str else {"kind": "none"}
+        capture_window_id = None
+        if identifier.get("kind") == "window_id":
+          record = _macos_find_window_record(int(identifier["window_id"]))
+          if record is None:
+            return False, f"Window {identifier['window_id']} is not currently on screen.", None
+          capture_window_id = int(identifier["window_id"])
+          # Bring the owning app forward so the captured window is unobscured.
+          if record.get("pid"):
+            _macos_activate_pid(int(record["pid"]))
+            time.sleep(0.3)
+
+        # Decide the output path (temp file when returning base64 inline).
+        output_path = filename
+        if not output_path:
           temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-          filename = temp_file.name
+          output_path = temp_file.name
           temp_file.close()
-        
-        # Use screencapture command
-        # -x: no sound
-        # -t png: PNG format
-        # filename: output file
-        MCPLogger.log(TOOL_LOG_NAME, f"Taking macOS screenshot to: {filename}")
-        result = subprocess.run(
-          ['screencapture', '-x', '-t', 'png', filename],
-          capture_output=True,
-          text=True,
-          timeout=10
-        )
-        
+
+        # -x: silent, -t png: PNG. -l<id> and -o: capture just that window with no shadow.
+        screencapture_command = ['screencapture', '-x', '-t', 'png']
+        if capture_window_id is not None:
+          screencapture_command += ['-o', f'-l{capture_window_id}']
+        screencapture_command.append(output_path)
+
+        MCPLogger.log(TOOL_LOG_NAME, f"macOS screencapture: {' '.join(screencapture_command)}")
+        result = subprocess.run(screencapture_command, capture_output=True, text=True, timeout=15)
         if result.returncode != 0:
           error_msg = result.stderr.strip() or "Unknown error"
           MCPLogger.log(TOOL_LOG_NAME, f"screencapture failed: {error_msg}")
           if temp_file:
-            try:
-              os.unlink(filename)
-            except:
-              pass
+            try: os.unlink(output_path)
+            except Exception: pass
           return False, f"Screenshot failed: {error_msg}", None
-        
-        # If we created a temp file, read it and convert to base64
+
+        # Optional region crop (best-effort; requires PIL).
+        if region and len(region) == 4:
+          if Image is None:
+            MCPLogger.log(TOOL_LOG_NAME, "Region crop requested but PIL is unavailable - returning full capture")
+          else:
+            try:
+              region_x, region_y, region_width, region_height = region
+              with Image.open(output_path) as captured_image:
+                image_width, image_height = captured_image.size
+                if region_x < 0:
+                  region_x = image_width + region_x
+                if region_y < 0:
+                  region_y = image_height + region_y
+                if region_width == 0:
+                  region_width = image_width - region_x
+                if region_height == 0:
+                  region_height = image_height - region_y
+                crop_box = (region_x, region_y, region_x + region_width, region_y + region_height)
+                captured_image.crop(crop_box).save(output_path)
+            except Exception as crop_error:
+              MCPLogger.log(TOOL_LOG_NAME, f"Region crop failed ({crop_error}); returning full capture")
+
+        # Return inline base64 when no filename was requested.
         if temp_file:
-          try:
-            import base64
-            with open(filename, 'rb') as f:
-              image_data = f.read()
-            base64_data = base64.b64encode(image_data).decode('utf-8')
-            
-            # Clean up temp file
-            try:
-              os.unlink(filename)
-            except:
-              pass
-            
-            MCPLogger.log(TOOL_LOG_NAME, f"Screenshot captured successfully (size: {len(image_data)} bytes)")
-            return True, "Screenshot captured successfully", base64_data
-          except Exception as e:
-            MCPLogger.log(TOOL_LOG_NAME, f"Error reading screenshot file: {e}")
-            try:
-              os.unlink(filename)
-            except:
-              pass
-            return False, f"Error processing screenshot: {e}", None
-        else:
-          # Screenshot saved to user-specified file
-          MCPLogger.log(TOOL_LOG_NAME, f"Screenshot saved to {filename}")
-          return True, f"Screenshot saved to {filename}", None
-          
+          import base64
+          with open(output_path, 'rb') as f:
+            image_data = f.read()
+          try: os.unlink(output_path)
+          except Exception: pass
+          base64_data = base64.b64encode(image_data).decode('utf-8')
+          MCPLogger.log(TOOL_LOG_NAME, f"macOS screenshot captured ({len(image_data)} bytes)")
+          return True, "Screenshot captured successfully", base64_data
+
+        MCPLogger.log(TOOL_LOG_NAME, f"Screenshot saved to {output_path}")
+        return True, f"Screenshot saved to {output_path}", None
+
       except subprocess.TimeoutExpired:
         if temp_file:
-          try:
-            os.unlink(filename)
-          except:
-            pass
+          try: os.unlink(temp_file.name)
+          except Exception: pass
         return False, "Screenshot timeout", None
       except Exception as e:
-        if temp_file and filename:
-          try:
-            os.unlink(filename)
-          except:
-            pass
+        if temp_file:
+          try: os.unlink(temp_file.name)
+          except Exception: pass
         MCPLogger.log(TOOL_LOG_NAME, f"Error in take_screenshot_functional: {e}")
         return False, f"Screenshot error: {e}", None
+
+    # ------------------------------------------------------------------
+    # macOS keyboard synthesis (send_text) via CGEvent
+    # ------------------------------------------------------------------
+    # Map the Windows virtual-key codes that parse_autohotkey_text_to_input_events() emits to
+    # macOS virtual key codes (Carbon/HIToolbox kVK_* values). Only non-printable keys need to
+    # be here; ordinary text is typed straight through as Unicode, so it needs no mapping.
+    WINDOWS_VK_TO_MACOS_KEYCODE = {
+        0x0D: 0x24,  # Enter/Return -> kVK_Return
+        0x1B: 0x35,  # Escape -> kVK_Escape
+        0x09: 0x30,  # Tab -> kVK_Tab
+        0x20: 0x31,  # Space -> kVK_Space
+        0x08: 0x33,  # Backspace -> kVK_Delete (backspace)
+        0x2E: 0x75,  # Delete (forward) -> kVK_ForwardDelete
+        0x25: 0x7B,  # Left arrow
+        0x27: 0x7C,  # Right arrow
+        0x28: 0x7D,  # Down arrow
+        0x26: 0x7E,  # Up arrow
+        0x24: 0x73,  # Home
+        0x23: 0x77,  # End
+        0x21: 0x74,  # Page Up
+        0x22: 0x79,  # Page Down
+        0x70: 0x7A, 0x71: 0x78, 0x72: 0x63, 0x73: 0x76,  # F1-F4
+        0x74: 0x60, 0x75: 0x61, 0x76: 0x62, 0x77: 0x64,  # F5-F8
+        0x78: 0x65, 0x79: 0x6D, 0x7A: 0x67, 0x7B: 0x6F,  # F9-F12
+    }
+    # US ANSI keyboard virtual key codes for the printable letters/digits/punctuation that a
+    # modifier chord targets (e.g. '#c' -> Command+C). Sending a real key code (not a flagged
+    # Unicode character) is what makes macOS shortcuts actually fire.
+    MACOS_KEYCODE_FOR_ASCII_CHARACTER = {
+        'a': 0, 's': 1, 'd': 2, 'f': 3, 'h': 4, 'g': 5, 'z': 6, 'x': 7, 'c': 8, 'v': 9,
+        'b': 11, 'q': 12, 'w': 13, 'e': 14, 'r': 15, 'y': 16, 't': 17,
+        '1': 18, '2': 19, '3': 20, '4': 21, '6': 22, '5': 23, '=': 24, '9': 25, '7': 26,
+        '-': 27, '8': 28, '0': 29, ']': 30, 'o': 31, 'u': 32, '[': 33, 'i': 34, 'p': 35,
+        'l': 37, 'j': 38, "'": 39, 'k': 40, ';': 41, '\\': 42, ',': 43, '/': 44, 'n': 45,
+        'm': 46, '.': 47, '`': 50,
+    }
+    # Windows modifier VK codes -> macOS CGEvent flag masks (resolved lazily against Quartz).
+    WINDOWS_MODIFIER_VK_TO_MACOS_FLAG_NAME = {
+        0x10: "kCGEventFlagMaskShift", 0xA0: "kCGEventFlagMaskShift", 0xA1: "kCGEventFlagMaskShift",
+        0x11: "kCGEventFlagMaskControl", 0xA2: "kCGEventFlagMaskControl", 0xA3: "kCGEventFlagMaskControl",
+        0x12: "kCGEventFlagMaskAlternate", 0xA4: "kCGEventFlagMaskAlternate", 0xA5: "kCGEventFlagMaskAlternate",
+        0x5B: "kCGEventFlagMaskCommand", 0x5C: "kCGEventFlagMaskCommand",  # Win key -> Command
+    }
+
+    def send_text_functional(hwnd_str: str, text: str) -> Tuple[bool, str]:
+      """macOS implementation: send text/keystrokes via CGEvent, reusing the shared
+      AutoHotkey-style parser so the syntax is identical across platforms.
+
+      Ordinary characters are typed as Unicode (no keyboard-layout mapping needed). Special keys
+      ({Enter}, {Tab}, {F1}-{F12}, arrows, etc.) map to macOS key codes. Modifier prefixes apply
+      as CGEvent flags, with one macOS-specific mapping: '#' (the Windows key) becomes Command,
+      so '#c' is Command-C (copy) on macOS. Requires macOS Accessibility permission.
+
+      Args:
+        hwnd_str: Window-number handle from list_windows (its app is focused first)
+        text: Text/keystrokes in AutoHotkey-style syntax (see readme)
+
+      Returns:
+        Tuple of (success, message)
+      """
+      if not MACOS_HAS_QUARTZ:
+        return False, "Quartz is unavailable; cannot synthesize keyboard input on this macOS build."
+      if not macos_accessibility_permission_is_granted():
+        return False, _MACOS_ACCESSIBILITY_PERMISSION_HINT
+      try:
+        # Focus the target window's application first (best effort).
+        identifier = _macos_parse_window_identifier(hwnd_str) if hwnd_str else {"kind": "none"}
+        if identifier.get("kind") == "window_id":
+          record = _macos_find_window_record(int(identifier["window_id"]))
+          if record and record.get("pid"):
+            _macos_activate_pid(int(record["pid"]))
+            time.sleep(0.15)
+        else:
+          pid, _app_name, _record = _macos_resolve_target_pid_and_appname(hwnd_str)
+          if pid:
+            _macos_activate_pid(pid)
+            time.sleep(0.15)
+
+        parsed_events = parse_autohotkey_text_to_input_events(text)
+
+        # B3 parity with Windows: optionally refuse Win/Command chords (# prefix) when the
+        # operator has disabled them, so an injected caller cannot fire system shortcuts.
+        if not _capability_is_allowed(_get_system_tool_security_policy(), "allow_win_key_chords"):
+          command_virtual_codes = {0x5B, 0x5C}
+          if any(event_type in ("vk_press", "vk_down", "vk_up") and code in command_virtual_codes
+                 for event_type, code, _ in parsed_events):
+            return False, ("Command/Win-key chords are disabled by this server's system_tool_security "
+                           "policy (allow_win_key_chords=false).")
+
+        Q = macos_quartz_module
+        active_modifier_flag_mask = 0
+
+        def resolve_flag_mask(modifier_vk_code: int) -> int:
+          flag_attribute_name = WINDOWS_MODIFIER_VK_TO_MACOS_FLAG_NAME.get(modifier_vk_code)
+          if flag_attribute_name is None:
+            return 0
+          return int(getattr(Q, flag_attribute_name, 0))
+
+        def post_keycode(macos_key_code: int):
+          for is_key_down in (True, False):
+            keyboard_event = Q.CGEventCreateKeyboardEvent(None, macos_key_code, is_key_down)
+            if active_modifier_flag_mask:
+              Q.CGEventSetFlags(keyboard_event, active_modifier_flag_mask)
+            Q.CGEventPost(Q.kCGHIDEventTap, keyboard_event)
+            time.sleep(0.005)
+
+        def post_unicode(character: str):
+          for is_key_down in (True, False):
+            keyboard_event = Q.CGEventCreateKeyboardEvent(None, 0, is_key_down)
+            Q.CGEventKeyboardSetUnicodeString(keyboard_event, len(character), character)
+            if active_modifier_flag_mask:
+              Q.CGEventSetFlags(keyboard_event, active_modifier_flag_mask)
+            Q.CGEventPost(Q.kCGHIDEventTap, keyboard_event)
+            time.sleep(0.005)
+
+        for event_type, code, _ in parsed_events:
+          if event_type == "vk_down":
+            active_modifier_flag_mask |= resolve_flag_mask(code)
+          elif event_type == "vk_up":
+            active_modifier_flag_mask &= ~resolve_flag_mask(code)
+          elif event_type == "vk_press":
+            macos_key_code = WINDOWS_VK_TO_MACOS_KEYCODE.get(code)
+            if macos_key_code is not None:
+              post_keycode(macos_key_code)
+            else:
+              # A printable VK press (letter/digit/punct), typically part of a modifier chord
+              # like Command+C. Prefer a real key code so the shortcut fires; if the modifier is
+              # only Shift (or none), fall back to typing the character as Unicode.
+              try:
+                character = chr(code).lower()
+              except Exception:
+                character = ""
+              ascii_key_code = MACOS_KEYCODE_FOR_ASCII_CHARACTER.get(character)
+              # With any modifier held we must emit a real key event (so Command+C, Shift+A,
+              # etc. actually fire); with no modifier a lone printable is just typed as text.
+              if ascii_key_code is not None and active_modifier_flag_mask:
+                post_keycode(ascii_key_code)
+              elif character:
+                post_unicode(character)
+          elif event_type == "unicode":
+            post_unicode(chr(code))
+
+        display_text = text[:50] + "..." if len(text) > 50 else text
+        MCPLogger.log(TOOL_LOG_NAME, f"Sent text/keys: {_redact_sensitive_for_log(text)} on macOS")
+        return True, f"Successfully sent text '{display_text}'"
+      except Exception as e:
+        return False, f"Error sending text: {e}"
+
+    # ------------------------------------------------------------------
+    # macOS UI-element scanning / clicking via the Accessibility (AX) tree
+    # ------------------------------------------------------------------
+    class macos_ax_scan_result_holder_with_clickable_lookup:
+      """Holds a completed macOS AX scan so the shared get_clickable_elements_functional (which
+      calls .find_all_buttons_and_clickable_elements_with_coordinates()) works unchanged, exactly
+      like the Windows UI-tree walker object it substitutes for."""
+      def __init__(self, clickable_elements_with_coordinates: List[Dict[str, any]]):
+        self._clickable_elements_with_coordinates = clickable_elements_with_coordinates
+      def find_all_buttons_and_clickable_elements_with_coordinates(self) -> List[Dict[str, any]]:
+        return self._clickable_elements_with_coordinates
+
+    # AX roles that represent something a user can click/activate.
+    _MACOS_CLICKABLE_AX_ROLES = {
+        "AXButton", "AXMenuButton", "AXMenuItem", "AXMenuBarItem", "AXCheckBox",
+        "AXRadioButton", "AXPopUpButton", "AXLink", "AXTab", "AXDisclosureTriangle",
+        "AXIncrementor", "AXStepper", "AXSegmentedControl", "AXToolbarButton",
+    }
+
+    def _macos_walk_ax_tree(root_ax_element, max_depth: int, wall_clock_deadline: float) -> List[Dict[str, any]]:
+      """Breadth-first walk of an AX element subtree, collecting a flat list of element dicts.
+
+      Bounded by both max_depth and a wall-clock deadline so a huge or slow tree cannot block the
+      worker (and therefore the MCP connection) thread indefinitely - the same protection the
+      Windows UI walker applies."""
+      AX = macos_accessibility_services_module
+      collected_elements = []
+      # Each queue item is (ax_element, depth, parent_index).
+      breadth_first_queue = [(root_ax_element, 0, -1)]
+      while breadth_first_queue:
+        if time.monotonic() > wall_clock_deadline:
+          MCPLogger.log(TOOL_LOG_NAME, f"macOS AX scan wall-clock budget exceeded after {len(collected_elements)} elements - stopping early")
+          break
+        current_element, depth, parent_index = breadth_first_queue.pop(0)
+        role = _macos_ax_attribute_as_text(current_element, AX.kAXRoleAttribute)
+        title = _macos_ax_attribute_as_text(current_element, AX.kAXTitleAttribute)
+        description = _macos_ax_attribute_as_text(current_element, AX.kAXDescriptionAttribute)
+        value_text = _macos_ax_attribute_as_text(current_element, AX.kAXValueAttribute)
+        role_description = _macos_ax_attribute_as_text(current_element, AX.kAXRoleDescriptionAttribute)
+        element_x, element_y, element_width, element_height = _macos_ax_element_bounds(current_element)
+        this_index = len(collected_elements)
+        collected_elements.append({
+          "control_type": role,
+          "subrole": _macos_ax_attribute_as_text(current_element, AX.kAXSubroleAttribute),
+          "role_description": role_description,
+          "name": title or description or value_text,
+          "value_text": value_text,
+          "help_text": _macos_ax_attribute_as_text(current_element, AX.kAXHelpAttribute),
+          "automation_id": _macos_ax_attribute_as_text(current_element, AX.kAXIdentifierAttribute),
+          "bounds": {"x": element_x, "y": element_y, "width": element_width, "height": element_height},
+          "center_x": element_x + element_width // 2,
+          "center_y": element_y + element_height // 2,
+          "tree_depth_level": depth,
+          "parent_index": parent_index,
+          "is_clickable": role in _MACOS_CLICKABLE_AX_ROLES,
+        })
+        if depth < max_depth:
+          children = _macos_ax_copy_attribute(current_element, AX.kAXChildrenAttribute)
+          if children:
+            try:
+              for child_element in list(children):
+                breadth_first_queue.append((child_element, depth + 1, this_index))
+            except Exception:
+              pass
+      return collected_elements
+
+    def scan_ui_elements_functional(window_title: Optional[str] = None, hwnd_str: Optional[str] = None, session_key: object = None) -> Dict[str, any]:
+      """macOS implementation: extract the Accessibility (AX) element tree of a window/app.
+
+      Mirrors the Windows scanner's contract: returns window_info, a flat extracted_ui_elements
+      list (role, name, value, bounds, center coordinates, depth), and an inline clickable_elements
+      list; the scan is also stored per-session so get_clickable_elements works afterwards.
+      Requires macOS Accessibility permission.
+
+      Args:
+        window_title: Application/window title to target (matched against the CGWindow app name
+          or window title), optional if hwnd_str is given
+        hwnd_str: Window-number handle from list_windows, optional if window_title is given
+        session_key: Per-caller key used to isolate this caller's stored scan
+
+      Returns:
+        Dict with window_info, extracted_ui_elements, clickable_elements (or an 'error' key)
+      """
+      if not MACOS_HAS_ACCESSIBILITY_API:
+        return {"error": "ApplicationServices (AX API) is unavailable; cannot scan UI elements on this macOS build.", "extracted_ui_elements": []}
+      if not macos_accessibility_permission_is_granted():
+        return {"error": _MACOS_ACCESSIBILITY_PERMISSION_HINT, "extracted_ui_elements": []}
+      try:
+        target_pid = None
+        target_app_name = None
+        window_record = None
+        if hwnd_str:
+          target_pid, target_app_name, window_record = _macos_resolve_target_pid_and_appname(hwnd_str)
+        elif window_title:
+          # Match a CGWindow whose app name or title contains the requested text.
+          wanted = window_title.lower()
+          for record in _macos_copy_onscreen_window_records():
+            if wanted in (record["app_name"] or "").lower() or wanted in (record["title"] or "").lower():
+              target_pid = int(record["pid"]); target_app_name = record["app_name"]; window_record = record
+              break
+        if not target_pid:
+          return {"error": f"Could not resolve a macOS application to scan from {'hwnd ' + hwnd_str if hwnd_str else 'title ' + repr(window_title)}", "extracted_ui_elements": []}
+
+        AX = macos_accessibility_services_module
+        # Prefer scanning just the matched window's subtree; fall back to the whole app element.
+        root_element = _macos_ax_best_matching_window_element(target_pid, window_record)
+        if root_element is None:
+          root_element = AX.AXUIElementCreateApplication(target_pid)
+
+        scan_wall_clock_deadline = time.monotonic() + 30.0
+        extracted_elements = _macos_walk_ax_tree(root_element, max_depth=40, wall_clock_deadline=scan_wall_clock_deadline)
+
+        clickable_elements = [
+          {
+            "name": element["name"],
+            "control_type": element["control_type"],
+            "center_x": element["center_x"],
+            "center_y": element["center_y"],
+            "bounds": element["bounds"],
+          }
+          for element in extracted_elements
+          if element["is_clickable"] and (element["bounds"]["width"] > 0 or element["bounds"]["height"] > 0)
+        ]
+
+        scan_result = {
+          "window_info": {
+            "title": (window_record or {}).get("title", "") or target_app_name or "",
+            "app_name": target_app_name or "",
+            "pid": target_pid,
+            "hwnd": hwnd_str or (str(window_record["window_id"]) if window_record else None),
+          },
+          "scan_summary": {
+            "total_elements": len(extracted_elements),
+            "total_clickable": len(clickable_elements),
+          },
+          "extracted_ui_elements": extracted_elements,
+          "clickable_elements": clickable_elements,
+          "total_clickable_found": len(clickable_elements),
+        }
+        _store_ui_scanner_for_session(session_key, macos_ax_scan_result_holder_with_clickable_lookup(clickable_elements))
+        MCPLogger.log(TOOL_LOG_NAME, f"macOS AX scan: {len(extracted_elements)} elements, {len(clickable_elements)} clickable (pid {target_pid})")
+        return scan_result
+      except Exception as e:
+        MCPLogger.log(TOOL_LOG_NAME, f"Error in macOS scan_ui_elements_functional: {e}")
+        return {"error": f"Error scanning UI elements: {e}", "extracted_ui_elements": []}
+
+    def click_ui_element_functional(hwnd_str: str, element_name: str) -> Tuple[bool, str]:
+      """macOS implementation: find a UI element by name and activate it via the AX API.
+
+      Walks the target application's AX tree, matches an element whose title/description/value or
+      identifier equals (preferred) or contains element_name, and performs its AXPress action;
+      if the element exposes no press action, synthesizes a click at its center instead. Requires
+      macOS Accessibility permission.
+
+      Args:
+        hwnd_str: Window-number handle from list_windows (or 'pid:<n>' / app name)
+        element_name: Name, label, or AX identifier of the element to click
+
+      Returns:
+        Tuple of (success, message)
+      """
+      if not MACOS_HAS_ACCESSIBILITY_API:
+        return False, "ApplicationServices (AX API) is unavailable; cannot click UI elements on this macOS build."
+      if not macos_accessibility_permission_is_granted():
+        return False, _MACOS_ACCESSIBILITY_PERMISSION_HINT
+      try:
+        target_pid, target_app_name, window_record = _macos_resolve_target_pid_and_appname(hwnd_str)
+        if not target_pid:
+          return False, f"Could not resolve a macOS application from handle '{hwnd_str}'"
+        _macos_activate_pid(target_pid)
+        time.sleep(0.15)
+        AX = macos_accessibility_services_module
+        root_element = _macos_ax_best_matching_window_element(target_pid, window_record)
+        if root_element is None:
+          root_element = AX.AXUIElementCreateApplication(target_pid)
+
+        # Walk the tree, but keep live AX element handles so we can act on the match.
+        wanted = element_name.strip()
+        wanted_lower = wanted.lower()
+        wall_clock_deadline = time.monotonic() + 20.0
+        breadth_first_queue = [(root_element, 0)]
+        exact_match_element = None
+        substring_match_element = None
+        while breadth_first_queue and (exact_match_element is None):
+          if time.monotonic() > wall_clock_deadline:
+            break
+          current_element, depth = breadth_first_queue.pop(0)
+          candidate_texts = [
+            _macos_ax_attribute_as_text(current_element, AX.kAXTitleAttribute),
+            _macos_ax_attribute_as_text(current_element, AX.kAXDescriptionAttribute),
+            _macos_ax_attribute_as_text(current_element, AX.kAXValueAttribute),
+            _macos_ax_attribute_as_text(current_element, AX.kAXIdentifierAttribute),
+          ]
+          for candidate_text in candidate_texts:
+            if not candidate_text:
+              continue
+            if candidate_text == wanted:
+              exact_match_element = current_element
+              break
+            if substring_match_element is None and wanted_lower in candidate_text.lower():
+              substring_match_element = current_element
+          if depth < 40:
+            children = _macos_ax_copy_attribute(current_element, AX.kAXChildrenAttribute)
+            if children:
+              try:
+                for child_element in list(children):
+                  breadth_first_queue.append((child_element, depth + 1))
+              except Exception:
+                pass
+
+        matched_element = exact_match_element or substring_match_element
+        if matched_element is None:
+          return False, f"Could not find a UI element matching '{element_name}' in '{target_app_name or target_pid}'"
+
+        press_error = AX.AXUIElementPerformAction(matched_element, AX.kAXPressAction)
+        if press_error == AX.kAXErrorSuccess:
+          MCPLogger.log(TOOL_LOG_NAME, f"macOS AXPress on '{element_name}' (pid {target_pid})")
+          return True, f"Successfully pressed UI element '{element_name}' in '{target_app_name or target_pid}'"
+
+        # No press action - fall back to a synthesized click at the element's center.
+        element_x, element_y, element_width, element_height = _macos_ax_element_bounds(matched_element)
+        if element_width > 0 or element_height > 0:
+          center_x = element_x + element_width // 2
+          center_y = element_y + element_height // 2
+          success, message = _macos_post_mouse_click_at_global_point(center_x, center_y, "left")
+          if success:
+            return True, f"Clicked UI element '{element_name}' at ({center_x}, {center_y}) [no AXPress action available]"
+          return False, message
+        return False, f"UI element '{element_name}' has no press action and no usable bounds to click."
+      except Exception as e:
+        return False, f"Error clicking UI element: {e}"
 
     def get_display_information_summary_and_full() -> Dict[str, any]:
       """macOS implementation: Get comprehensive display/monitor information.

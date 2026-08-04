@@ -7,40 +7,72 @@ Author: Christopher Nathan Drake (cnd)
 Tool implementation for allowing external tools to register themselves
 for relay operations through the MCP interface.
 
-See remote_demo.txt for logs of a registration and tool call.
-
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "5ꓝaƬ𝘈𝛢ŪƍҳΑeU𝟑0𝟢ᗪᏴ𝟧ᖴ5þȜȠWɯυᏂʈꜱxѵ2СųҮꜱɡЗɊODꓠѡ৭𝟩Р𝖠Ryꓬ𝖠𝟦һΚȜΝꞇnЈh𝟑ƱⅠZᑕᖴTꓟб𝟛ꓣᴛКaⲞЗбßkοĐ5ƤȜ4ʈҮһCƦ𝙰ᴅī𝟦уʋvᎠ7νƶᴛΥɅꓚꓪHʈī"
-"signdate": "2025-11-10T00:45:38.467Z",
+"signature": "1ɡⅮpƳ𝕌ƐƲ𝟤ƙⲞᏎЅΟƲ𐓒ⲢPυᎠҮΟꜱᴜZƬᴅꓓƟꓦꓳȠΚƲꓮωցսiᴡꜱᴠVᏮһgрᎠƊΒXƬսʌⲔ×Ƶŧꓧ𝟑ᴜҮJ4νᏎƻyƼ1ƨHһЗꓜ7Ðһ𝟟ıŪᗅƬ𝛢BуƵꙅƘᏟYʈЅƿꓜŧ2𝟪𝟫ΝƲÞĐⲦÐƲhEƵ"
+"signdate": "2026-07-29T09:30:27.183Z",
 
 """
 
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
 import time, uuid, traceback
 import json
-import urllib.request
-import urllib.parse
+import re
+import threading
 from easy_mcp.server import MCPLogger
-from . import get_server
+from . import get_server, get_authenticated_user
 
-COMPRESS_TOOL_DEFINITIONS = True
-TEST_TOKEN = "e5076d"
+# PURE RELAY -- remote.py OWNS NO unlock token of its own, and (2026-07 pure-relay migration) it
+# does NOT mint, store, validate, strip, or answer tokens/readme for the tools that register
+# through it. WHY: a tool_unlock_token is a COMPREHENSION GATE (proof the caller has read THAT
+# tool's readme), NOT authentication and NOT a secret. Each tool must OWN its token and version-
+# lock it to ITS OWN code, so the token rotates when the tool changes and forces a re-read. The
+# `remote` tool itself is machine-only ("Do not call directly") and is gated by the registrant-
+# chosen TOOL_API_KEY (a genuine secret for re-register/unregister -- a DIFFERENT thing from a
+# comprehension token), so it needs no comprehension token. The handler below forwards every
+# operation (readme, get_unlock_token, tool_unlock_token, ...) verbatim to the registrant, which
+# answers readme (carrying its own current token) and validates the token itself.
+# See doc/50_non-AI-calling-and-how-to-get-unlock-tokens.md.
 
-# ANSI escape codes for terminal colors and formatting
-NORM='\033[0m';RED='\033[31;1m';GRN='\033[32;1m';YEL='\033[33;1m';NAV='\033[34;1m';BLU='\033[36;1m';SAVE='\033[s';REST='\033[u';CLR='\033[K';PRP='\033[35;1m';WHT='\033[37;1m';ZZR='\033[0m'
+# Registrant-supplied text/schema size caps (a hostile registrant must not be able to
+# inject megabytes into every AI conversation via descriptions/readmes).
+# MAX_DESCRIPTION_LENGTH raised 4096 -> 16384 (same as MAX_README_LENGTH): the real
+# chrome_browser extension sends a legitimate 8646-char description, which the old cap
+# rejected, silently keeping the tool out of tools/list. The caps still bound total
+# registrant text to tens of KB, which is all the hostile-registrant defence needs.
+MAX_DESCRIPTION_LENGTH = 16384
+MAX_README_LENGTH = 16384
+MAX_PARAMETERS_JSON_LENGTH = 32768
+REMOTE_TOOL_NAME_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
+# Relayed calls must not leave the original caller hanging forever: each pending call
+# gets a reply deadline and a background reaper notifies the caller on expiry.
+DEFAULT_REPLY_TIMEOUT_SECONDS = 60.0
+MIN_REPLY_TIMEOUT_SECONDS = 1.0
+MAX_REPLY_TIMEOUT_SECONDS = 3600.0
+PENDING_CALL_SWEEP_INTERVAL_SECONDS = 5.0
+
+# One lock guards BOTH registries below: registration, relay, reply, unregister and
+# session-cleanup all run on different request threads.
+_registry_and_pending_calls_lock = threading.Lock()
 
 # Registry to store registered tools
-# Format: {tool_name: {description, parameters, callback_endpoint, api_key}}
+# Format: {final_tool_name: {description, parameters, synthetic_parameters,
+#          original_parameters, callback_endpoint, api_key, readme, tool_unlock_token,
+#          registered_at, registered_by, handler_info}}
 registered_tools = {}
 
-# Storage for pending tool calls, keyed by call_id
-# Format: {call_id: {tool_args, session_id, request_id, etc.}}
+# Storage for pending relayed tool calls, keyed by call_id.
+# Format: {call_id: {tool_args, tool_name, request_id, caller_session_id,
+#          registrant_session_id, created_at, reply_deadline, reply_timeout_seconds}}
+# Only minimal serializable context is stored (no live socket/server objects).
 pending_tool_calls = {}
 
 # Flag to track if cleanup callback has been registered
 _cleanup_callback_registered = False
+
+# Flag to track if the pending-call timeout reaper thread has been started
+_pending_call_reaper_thread_started = False
 
 # Tool definitions
 TOOLS = [
@@ -57,51 +89,46 @@ TOOLS = [
             "required": [],
             "type": "object"
         },
-        #"output": {
-        #    "type": "object",
-        #    "description": "returned data."
-        #},
 
         "real_parameters": { # Caller will pass "input":{"operation":"register", ...} to use this tool.
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["register"],
-                    "description": "Operation to perform"
-                },                
+                    "enum": ["register", "unregister", "list"],
+                    "description": "Operation to perform. register: add a tool (requires tool_name, description, parameters, TOOL_API_KEY). unregister: remove a tool you registered (requires tool_name plus the same TOOL_API_KEY used at registration). list: show registered remote tools."
+                },
                 "tool_name": {
-                    "title": "Tool Name", 
+                    "title": "Tool Name",
                     "type": "string",
-                    "description": "Name of the tool to register"
+                    "description": "Name of the tool to register/unregister. Allowed characters: A-Z a-z 0-9 _ - (max 64)."
                 },
                 "description": {
-                    "title": "Description", 
+                    "title": "Description",
                     "type": "string",
                     "description": "Description of what the tool does"
                 },
                 "parameters": {
-                    "title": "Parameters", 
+                    "title": "Parameters",
                     "type": "object",
                     "description": "JSON schema for tool parameters"
                 },
                 "callback_endpoint": {
-                    "title": "Callback Endpoint", 
+                    "title": "Callback Endpoint",
                     "type": "string",
-                    "description": "URL endpoint where tool calls should be sent"
+                    "description": "Optional metadata URL recorded with the registration. The relay itself always uses the registrant's SSE session, not this URL."
                 },
                 "readme": {
-                    "title": "readme magic-key", 
+                    "title": "readme magic-key",
                     "type": "string",
                     "description": "A VERY SHORT one or two-line description saying (1) Briefly: what this tool does, and (2) Briefly: when the AI will need to use it" # if "readme" key exists, it will be swapped with "description" and parameters will be renamed to real_parameters with tool_unlock_token added.
-                },                
+                },
                 "TOOL_API_KEY": {
-                    "title": "API Key", 
+                    "title": "API Key",
                     "type": "string",
-                    "description": "API key for authentication"
+                    "description": "Registrant-chosen secret. The same value authorizes same-name re-registration (replacement) and unregister."
                 }
             },
-            "real_required": ["tool_name", "description", "parameters", "callback_endpoint", "TOOL_API_KEY"],
-            "required": [],
+            "required": ["tool_name", "description", "parameters", "TOOL_API_KEY"],
             "type": "object"
         }
     }
@@ -116,104 +143,204 @@ def create_error_response(error_msg: str) -> Dict:
     }
 
 def resolve_tool_name_conflict(base_name: str) -> str:
-    """Resolve naming conflicts by appending numbers."""
-    if base_name not in registered_tools:
+    """Resolve naming conflicts by appending numbers.
+
+    Consults BOTH the remote registry and the server's full tool registry, so a remote
+    registrant can never shadow a built-in tool (e.g. python, sqlite).
+    Assumes _registry_and_pending_calls_lock is held by the caller.
+    """
+    server = get_server()
+
+    def _name_is_taken(candidate_name: str) -> bool:
+        if candidate_name in registered_tools:
+            return True
+        return bool(server) and candidate_name in server.tool_handlers
+
+    if not _name_is_taken(base_name):
         return base_name
-    
+
     counter = 2
-    while f"{base_name}{counter}" in registered_tools:
+    while _name_is_taken(f"{base_name}{counter}"):
         counter += 1
-    
+
     return f"{base_name}{counter}"
 
+def _unregister_tool_assuming_lock_held(tool_name: str) -> None:
+    """Remove one registered tool from both registries (idempotent).
 
+    Single shared helper for re-registration cleanup, unregister and session cleanup.
+    Assumes _registry_and_pending_calls_lock is held by the caller.
+    """
+    registered_tools.pop(tool_name, None)
+    server = get_server()
+    if server:
+        server.tool_handlers.pop(tool_name, None)
+    MCPLogger.log("REMOTE", f"Unregistered remote tool {tool_name}")
 
+# JSON-schema primitive type name -> acceptable Python types, for pre-relay validation.
+_JSON_SCHEMA_TYPE_TO_PYTHON_TYPES = {
+    'string': (str,),
+    'number': (int, float),
+    'integer': (int,),
+    'boolean': (bool,),
+    'array': (list,),
+    'object': (dict,),
+}
 
+def _validate_relayed_args_against_original_schema(relayed_args: Dict, original_parameters_schema: Dict) -> Optional[str]:
+    """Type-check declared properties of a relayed call against the registrant's schema.
 
-def create_remote_tool_handler(tool_name: str, callback_endpoint: str, api_key: str) -> Callable:
+    Only checks TYPE mismatches for properties the schema declares.  It deliberately does
+    NOT enforce 'required' and does NOT reject undeclared keys, because real registrants
+    (e.g. the browser extension) accept call forms looser than their registered schema.
+    Returns an error message string, or None when acceptable.
+    """
+    try:
+        if not isinstance(original_parameters_schema, dict):
+            return None
+        declared_properties = original_parameters_schema.get('properties', {})
+        if not isinstance(declared_properties, dict):
+            return None
+        type_mismatch_messages = []
+        for arg_name, arg_value in relayed_args.items():
+            declared_schema = declared_properties.get(arg_name)
+            if not isinstance(declared_schema, dict):
+                continue
+            declared_type = declared_schema.get('type')
+            acceptable_python_types = _JSON_SCHEMA_TYPE_TO_PYTHON_TYPES.get(declared_type)
+            if not acceptable_python_types:
+                continue
+            if declared_type in ('number', 'integer') and isinstance(arg_value, bool):
+                # bool is a subclass of int in Python; a boolean is NOT an acceptable number
+                type_mismatch_messages.append(f"'{arg_name}' must be a {declared_type}, got boolean")
+            elif not isinstance(arg_value, acceptable_python_types):
+                type_mismatch_messages.append(f"'{arg_name}' must be a {declared_type}, got {type(arg_value).__name__}")
+        if type_mismatch_messages:
+            return "; ".join(type_mismatch_messages)
+        return None
+    except Exception:
+        return None  # validation must never block a call
 
-    """Create a handler function for a remotely registered tool."""
+def _send_json_rpc_error_to_original_caller(pending_call_context: Dict, error_message: str) -> None:
+    """Best-effort JSON-RPC error to the session that originally called the remote tool."""
+    try:
+        server = get_server()
+        if not server:
+            return
+        error_response = {
+            "jsonrpc": "2.0",
+            "id": pending_call_context.get("request_id"),
+            "error": {
+                "code": -32000,
+                "message": error_message
+            }
+        }
+        server._send_response(pending_call_context.get("caller_session_id"), error_response)
+    except Exception as send_error:
+        MCPLogger.log("REMOTE", f"Warning: could not deliver error to original caller: {send_error}")
+
+def _sweep_expired_pending_tool_calls() -> None:
+    """Fail-and-remove pending relayed calls whose reply deadline has passed."""
+    now = time.time()
+    expired_entries = []
+    with _registry_and_pending_calls_lock:
+        for call_id in list(pending_tool_calls.keys()):
+            if now >= pending_tool_calls[call_id].get("reply_deadline", 0):
+                expired_entries.append((call_id, pending_tool_calls.pop(call_id)))
+    for call_id, pending_call_context in expired_entries:
+        timeout_seconds = pending_call_context.get("reply_timeout_seconds", DEFAULT_REPLY_TIMEOUT_SECONDS)
+        tool_name = pending_call_context.get("tool_name")
+        MCPLogger.log("REMOTE", f"Pending call {call_id} for tool {tool_name} expired after {timeout_seconds:.0f}s without a reply")
+        _send_json_rpc_error_to_original_caller(
+            pending_call_context,
+            f"Remote tool '{tool_name}' did not reply within {timeout_seconds:.0f} seconds"
+        )
+
+def _pending_call_reaper_loop() -> None:
+    while True:
+        try:
+            time.sleep(PENDING_CALL_SWEEP_INTERVAL_SECONDS)
+            _sweep_expired_pending_tool_calls()
+        except Exception as reaper_error:
+            MCPLogger.log("REMOTE", f"Pending-call reaper error: {reaper_error}")
+
+def _ensure_pending_call_reaper_thread_started() -> None:
+    """Start the timeout reaper thread lazily on first relayed call (never at import)."""
+    global _pending_call_reaper_thread_started
+    with _registry_and_pending_calls_lock:
+        if _pending_call_reaper_thread_started:
+            return
+        _pending_call_reaper_thread_started = True
+    reaper_thread = threading.Thread(target=_pending_call_reaper_loop, name="remote_pending_call_reaper", daemon=True)
+    reaper_thread.start()
+
+def create_remote_tool_handler(tool_name: str) -> Callable:
+    """Create a handler function for a remotely registered tool.
+
+    The relay is pure SSE-reverse: calls are pushed down the REGISTRANT's SSE session and
+    the reply comes back later via a tools/reply request (see _handle_tool_reply).
+    """
     def handler(tool_args: Dict) -> Dict:
-        """Handle calls to the remote tool by forwarding to its callback endpoint."""
-        MCPLogger.log("REMOTE", f"Tool {tool_name} args: {YEL}{tool_args}{NORM}") # REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '711cc8eac93b4320a394d27871e25c5c', 'request_id': '75db1c7e-4790-42f4-9fae-ae4fbde62465', 'client': <easy_mcp.server.MCPSession object at 0x000002417DA84440>, 'responder': <easy_mcp.server.MCPServer object at 0x000002413579B230>}}          
-        # params->arguments->input->operation->readme
+        try:
+            if not isinstance(tool_args, dict):
+                return create_error_response(f"Invalid arguments for {tool_name}: expected an object")
 
-        if COMPRESS_TOOL_DEFINITIONS:
+            MCPLogger.log("REMOTE", f"Tool {tool_name} called with argument keys: {sorted(k for k in tool_args.keys() if k != 'handler_info')}")
+
             while isinstance(tool_args, dict) and "input" in tool_args and isinstance(tool_args["input"], dict):
-                handler_info=tool_args.get("handler_info", None) # keep handler_info if it exists.
+                handler_info = tool_args.get("handler_info", None) # keep handler_info if it exists.
                 tool_args = tool_args["input"] # unwrap if double+ wrapped by mistake.
                 if handler_info is not None: tool_args["handler_info"] = handler_info # keep handler_info if it exists.
-                MCPLogger.log("REMOTE", f"Unwrapped Tool {tool_name} args: {YEL}{tool_args}{NORM}") 
 
-        
-        # Check for tool_unlock_token when using compressed tool definitions
-        if COMPRESS_TOOL_DEFINITIONS:
-            operation = tool_args.get("operation")
-            if operation == "readme": return readme(tool_args) # special-case for supplying the original tool description using our synthetic readme event.  tool_args is required, so handler_info can be used.
-            
-            # If tool_unlock_token is missing, return error with documentation
-            if "tool_unlock_token" not in tool_args or tool_args["tool_unlock_token"] != TEST_TOKEN:
-                MCPLogger.log("REMOTE", f"Missing/Incorrect tool_unlock_token for {tool_name}, returning error with documentation")
-                
-                # Get the readme documentation to include in the error
-                readme_response = readme(tool_args)
-                
-                # Extract the documentation text from the readme response
-                readme_text = ""
-                if readme_response and not readme_response.get("isError", False):
-                    content = readme_response.get("content", [])
-                    if content and len(content) > 0:
-                        readme_text = content[0].get("text", "")
-                
-                # Create error response with documentation
-                if "tool_unlock_token" not in tool_args:
-                    error_message = f"Error: Missing required tool_unlock_token for {tool_name}.\n\n"
-                else:
-                    error_message = f"Error: Incorrect tool_unlock_token for {tool_name}.\n\n"
-                error_message += "This tool requires a security token to ensure proper understanding of its usage. "
-                error_message += "Please read the documentation below and include the tool_unlock_token in your request.\n\n"
-                error_message += "Documentation:\n" + readme_text
-                
-                return {
-                    "content": [{"type": "text", "text": error_message}],
-                    "isError": True
-                }
-        
-        #MCPLogger.log("REMOTE", f"COMPRESS_TOOL_DEFINITIONS={COMPRESS_TOOL_DEFINITIONS} INPUT={YEL}{tool_args.get("input", {})} OPERATION={tool_args.get("input", {}).get("operation")}{NORM}") # REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '711cc8eac93b4320a394d27871e25c5c', 'request_id': '75db1c7e-4790-42f4-9fae-ae4fbde62465', 'client': <easy_mcp.server.MCPSession object at 0x000002417DA84440>, 'responder': <easy_mcp.server.MCPServer object at 0x000002413579B230>}}                  
-        MCPLogger.log("REMOTE", "COMPRESS_TOOL_DEFINITIONS={} INPUT={}{} OPERATION={}{}".format( COMPRESS_TOOL_DEFINITIONS, YEL, tool_args.get("input", {}), tool_args.get("input", {}).get("operation"), NORM)) # REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '711cc8eac93b4320a394d27871e25c5c', 'request_id': '75db1c7e-4790-42f4-9fae-ae4fbde62465', 'client': <easy_mcp.server.MCPSession object at 0x000002417DA84440>, 'responder': <easy_mcp.server.MCPServer object at 0x000002413579B230>}}          
-        # MCPLogger.log("REMOTE", f"COMPRESS_TOOL_DEFINITIONS={COMPRESS_TOOL_DEFINITIONS} INPUT={YEL}{tool_args.get("input", {})} OPERATION={tool_args.get("input", {}).get("operation")}{NORM}") # REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '711cc8eac93b4320a394d27871e25c5c', 'request_id': '75db1c7e-4790-42f4-9fae-ae4fbde62465', 'client': <easy_mcp.server.MCPSession object at 0x000002417DA84440>, 'responder': <easy_mcp.server.MCPServer object at 0x000002413579B230>}}          
+            # PURE RELAY: forward EVERY operation verbatim to the registrant -- including readme,
+            # get_unlock_token and any tool_unlock_token. The tool OWNS its comprehension gate: it
+            # answers readme (returning its own current token) and validates the token itself,
+            # returning its readme on a miss. remote.py neither mints, stores, validates, strips,
+            # nor answers tokens/readme here (see the module note at the top of this file).
+            with _registry_and_pending_calls_lock:
+                tool_registration = registered_tools.get(tool_name)
+            if tool_registration is None:
+                return create_error_response(f"Remote tool {tool_name} is no longer registered")
 
-        try:
             # Extract handler_info before removing it
             handler_info = tool_args.get('handler_info', {})
-            tool_handler = registered_tools[tool_name]
-            session_id = tool_handler.get('handler_info', {}).get('session_id')
-            request_id = handler_info.get('request_id') 
-            tool_name_from_info = handler_info.get('tool_name')
-            client_connection = handler_info.get('client')
-            responder = handler_info.get('responder')
-            call_id= f"{uuid.uuid4()}"
+            registrant_session_id = tool_registration.get('handler_info', {}).get('session_id')
+            request_id = handler_info.get('request_id')
+            tool_name_from_info = handler_info.get('tool_name') or tool_name
+            caller_session_id = handler_info.get('session_id')
+            call_id = f"{uuid.uuid4()}"
             temp_args = tool_args.copy()
 
-            pending_tool_calls[call_id] = tool_args
-            
-            # Remove the handler_info that gets added by the server
+            # Strip ONLY the server-internal routing metadata. Do NOT strip tool_unlock_token: the
+            # registrant owns the gate and must receive the token to validate it itself.
             temp_args.pop('handler_info', None) #   server.py:  tool_args['handler_info'] = {'tool_name':tool_name, 'session_id':session_id, 'request_id':request_id}
-            temp_args.pop('tool_unlock_token', None) 
 
-            # done above now:
-            # # If using compressed format (input wrapper), extract actual parameters
-            # if COMPRESS_TOOL_DEFINITIONS and "input" in temp_args:
-            #     input_args = temp_args["input"]
-            #     # Remove our synthetic parameters
-            #     input_args.pop("operation", None)
-            #     input_args.pop("tool_unlock_token", None)
-            #     # Use the remaining parameters
-            #     temp_args = input_args
+            # The legacy synthetic operation:"execute" envelope must not leak to the remote
+            # tool; any OTHER operation value is the tool's own and is forwarded verbatim.
+            original_declared_properties = (tool_registration.get("original_parameters") or {}).get("properties", {})
+            if temp_args.get('operation') == 'execute' and 'operation' not in original_declared_properties:
+                temp_args.pop('operation', None)
 
-            # Store the original tool_args and context for when the reply comes back
-            #pending_tool_calls[call_id] = tool_args
-            MCPLogger.log("REMOTE", f"Added pending tool call: {call_id} to pending_tool_calls: {pending_tool_calls} tool_handler={tool_handler}")
+            # Per-call reply timeout (defaults to DEFAULT_REPLY_TIMEOUT_SECONDS, clamped)
+            raw_timeout_value = temp_args.pop('_timeout_seconds', None)
+            reply_timeout_seconds = DEFAULT_REPLY_TIMEOUT_SECONDS
+            if raw_timeout_value is not None and not isinstance(raw_timeout_value, bool):
+                try:
+                    reply_timeout_seconds = float(raw_timeout_value)
+                except (TypeError, ValueError):
+                    reply_timeout_seconds = DEFAULT_REPLY_TIMEOUT_SECONDS
+            reply_timeout_seconds = max(MIN_REPLY_TIMEOUT_SECONDS, min(MAX_REPLY_TIMEOUT_SECONDS, reply_timeout_seconds))
+
+            # Cheap local validation against the registrant's declared schema
+            validation_error = _validate_relayed_args_against_original_schema(temp_args, tool_registration.get("original_parameters") or {})
+            if validation_error:
+                return create_error_response(f"Invalid arguments for {tool_name}: {validation_error}")
+
+            # Confirm the registrant's SSE session is still around before dispatching
+            server = get_server()
+            registrant_session = server.active_sessions.get(registrant_session_id) if (server and registrant_session_id) else None
+            if registrant_session is None or not registrant_session.is_active:
+                return create_error_response(f"Remote tool {tool_name} is not reachable: its registrant connection is gone")
 
             # Reconstruct the JSON-RPC request to send to the external tool
             outgoing_request = {
@@ -226,36 +353,37 @@ def create_remote_tool_handler(tool_name: str, callback_endpoint: str, api_key: 
                 "id": request_id
             }
 
-            MCPLogger.log("REMOTE", f"OUTGOING_REQUEST={YEL}{outgoing_request}{NORM}") # REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '711cc8eac93b4320a394d27871e25c5c', 'request_id': '75db1c7e-4790-42f4-9fae-ae4fbde62465', 'client': <easy_mcp.server.MCPSession object at 0x000002417DA84440>, 'responder': <easy_mcp.server.MCPServer object at 0x000002413579B230>}}          
-
-            # Get server instance and send the request
-            #server = get_server()
-            #if server and session_id:
-            if client_connection:
-                #wrong - needs new session_id:  server._send_response(session_id, outgoing_request) # WRONG - this is mcp - should be SSE.
-                message = {"jsonrpc": "2.0", "id": call_id, "reverse": {"tool": tool_name, "input": outgoing_request, "call_id":call_id, "isError": False}}
-
-                # cursor gets no reply this way:-
-                responder._send_response(session_id,message) # The reply to this will come back in to handle_remote as a tools/reply
-                MCPLogger.log("REMOTE", f"Sent request {message} to external tool through {responder} to session {session_id}") # send over the SSE connection to the chrome-extension from where the browser tool self-registered
-
-                # Wrong way... but worked when the browser called itself:-
-                #client_connection.send_message("message",message) # The reply to this will come back in to handle_remote as a tools/reply
-                #MCPLogger.log("REMOTE", f"Sent request {message} to external tool through {client_connection}.send_message - instead of through {responder}._send_response to session {session_id}") # client_connection is wrong - that's the client, not the extension.
-
-                return None # the reply comes from elsewhere later.
-            else:
-                MCPLogger.log("REMOTE", f"Warning: Could not send request - no client_connection found")
-
-
-            # nonsense unfinished code below here:-
-
-            result = "work-in-progress (this tool is not yet fully implemented)"
-            return {
-                "content": [{"type": "text", "text": str(result)}],
-                "isError": False
+            # Store minimal serializable context for when the reply comes back
+            # (no live socket/server objects - the reply path uses get_server()).
+            now = time.time()
+            pending_call_context = {
+                "tool_args": temp_args,
+                "tool_name": tool_name,
+                "request_id": request_id,
+                "caller_session_id": caller_session_id,
+                "registrant_session_id": registrant_session_id,
+                "created_at": now,
+                "reply_deadline": now + reply_timeout_seconds,
+                "reply_timeout_seconds": reply_timeout_seconds
             }
-                
+            with _registry_and_pending_calls_lock:
+                pending_tool_calls[call_id] = pending_call_context
+                pending_call_count = len(pending_tool_calls)
+            _ensure_pending_call_reaper_thread_started()
+
+            message = {"jsonrpc": "2.0", "id": call_id, "reverse": {"tool": tool_name, "input": outgoing_request, "call_id": call_id, "isError": False}}
+
+            # Send over the registrant's own SSE session (the reply will come back in to
+            # handle_remote as a tools/reply)
+            delivered_to_registrant = registrant_session.send_message("message", message)
+            if not delivered_to_registrant:
+                with _registry_and_pending_calls_lock:
+                    pending_tool_calls.pop(call_id, None)
+                return create_error_response(f"Could not deliver call to remote tool {tool_name}: send to registrant connection failed")
+
+            MCPLogger.log("REMOTE", f"Relayed call_id {call_id} for tool {tool_name} to registrant session {str(registrant_session_id)[:8]} ({pending_call_count} pending, timeout {reply_timeout_seconds:.0f}s)")
+            return None # the reply comes from elsewhere later.
+
         except Exception as e:
             error_msg = f"Error calling remote tool {tool_name}: {str(e)}"
             MCPLogger.log("REMOTE", error_msg+"\n"+traceback.format_exc())
@@ -268,34 +396,39 @@ def create_remote_tool_handler(tool_name: str, callback_endpoint: str, api_key: 
 
 def cleanup_tools_for_session(session_id: str) -> None:
     """
-    Clean up all tools registered for a specific session.
+    Clean up all tools registered for a specific session, and fail any pending
+    relayed calls tied to that session.
     
     Args:
         session_id: The session ID to clean up tools for
     """
     try:
-        tools_to_remove = []
-        
-        # Find all tools registered for this session
-        for tool_name, tool_info in registered_tools.items():
-            if tool_info.get('handler_info', {}).get('session_id') == session_id:
-                tools_to_remove.append(tool_name)
-        
-        # Remove each tool
-        for tool_name in tools_to_remove:
-            MCPLogger.log("REMOTE", f"Removing tool {tool_name} for session {session_id}")
-            
-            # Remove from registered_tools
-            del registered_tools[tool_name]
-            
-            # Remove from server's tool_handlers
-            server = get_server()
-            if server and tool_name in server.tool_handlers:
-                del server.tool_handlers[tool_name]
-                MCPLogger.log("REMOTE", f"Removed tool {tool_name} from server handlers")
-        
+        orphaned_pending_calls = []
+        with _registry_and_pending_calls_lock:
+            tools_to_remove = [
+                tool_name for tool_name, tool_info in registered_tools.items()
+                if tool_info.get('handler_info', {}).get('session_id') == session_id
+            ]
+            for tool_name in tools_to_remove:
+                MCPLogger.log("REMOTE", f"Removing tool {tool_name} for session {str(session_id)[:8]}")
+                _unregister_tool_assuming_lock_held(tool_name)
+
+            # Pending calls whose registrant or caller died must not linger forever
+            for call_id in list(pending_tool_calls.keys()):
+                pending_call_context = pending_tool_calls[call_id]
+                if session_id in (pending_call_context.get("registrant_session_id"), pending_call_context.get("caller_session_id")):
+                    orphaned_pending_calls.append((call_id, pending_tool_calls.pop(call_id)))
+
+        for call_id, pending_call_context in orphaned_pending_calls:
+            if pending_call_context.get("registrant_session_id") == session_id and pending_call_context.get("caller_session_id") != session_id:
+                _send_json_rpc_error_to_original_caller(
+                    pending_call_context,
+                    f"Remote tool '{pending_call_context.get('tool_name')}' disconnected before replying"
+                )
+
+        if tools_to_remove or orphaned_pending_calls:
+            MCPLogger.log("REMOTE", f"Cleaned up {len(tools_to_remove)} tools and {len(orphaned_pending_calls)} pending calls for session {str(session_id)[:8]}: {tools_to_remove}")
         if tools_to_remove:
-            MCPLogger.log("REMOTE", f"Cleaned up {len(tools_to_remove)} tools for session {session_id}: {tools_to_remove}")
             # Trigger Cursor reconnect when tools are removed
             trigger_cursor_reconnect_for_tool_changes()
         
@@ -306,9 +439,20 @@ def trigger_cursor_reconnect_for_tool_changes() -> None:
     """
     Trigger Cursor IDE to reconnect when tools are added or removed.
     This ensures Cursor sees the updated tool list.
+    (The server side collapses rapid repeat requests into a single touch,
+    so per-registration calls here do not cause a reconnect storm.)
     """
     server = get_server()
     if server:
+        try:
+            # Spec-correct live refresh for clients that honor it (Cursor does); the
+            # config touch below stays as the fallback for clients that do not. Added
+            # per doc/tools_list_changed_notification_gap_analysis_and_implementation_plan.md
+            # (closes GAP-1/2/3: register, unregister and dead-session cleanup all
+            # flow through this function AFTER the registry has been mutated).
+            server.schedule_tools_list_changed_notification_after_collapse_window()
+        except Exception as notification_error:
+            MCPLogger.log("REMOTE", f"Warning: could not schedule tools/list_changed notification: {notification_error}")
         try:
             # Wait 2 seconds to allow the changes to be fully processed
             server.trigger_cursor_reconnect(2)
@@ -318,62 +462,41 @@ def trigger_cursor_reconnect_for_tool_changes() -> None:
     else:
         MCPLogger.log("REMOTE", "Warning: Could not trigger Cursor reconnect - server instance not available")
 
-def remote_reply(reply):
-    MCPLogger.log("REMOTE_REPLY", reply)
 
+def readme(input_param: Dict, default_tool_name: Optional[str] = None) -> Dict:
+    """Handle readme requests for registered remote tools.
 
-def readme(input_param: Dict) -> Dict:
-    """Handle readme requests for registered remote tools."""
-    MCPLogger.log("REMOTE", f"{YEL}synthetic help request{NORM}") # REMOTE Tool browser args: {'input': {'operation': 'readme'}, 'handler_info': {'tool_name': 'browser', 'session_id': '88492eff12a8482da12c5d8cf4903dc8', 'request_id': 108 ...
+    default_tool_name lets internal callers (e.g. mcp_bridge fetching a token) get the
+    readme without server-injected handler_info.
+    """
+    MCPLogger.log("REMOTE", "synthetic help request")
 
-
-    try:        # Sus idea
-        # Extract tool name from handler_info
+    try:
+        # Extract tool name from handler_info (fall back to the handler's own name)
         handler_info = input_param.get('handler_info', {})
-        tool_name = handler_info.get('tool_name') # browser
-
-        # return create_error_response(f"Synthetic help request received")
-
+        tool_name = handler_info.get('tool_name') or default_tool_name
 
         if not tool_name:
             return create_error_response("Could not determine tool name from request")
         
         # Look up the tool in registered_tools
-        if tool_name not in registered_tools:
+        with _registry_and_pending_calls_lock:
+            tool_info = registered_tools.get(tool_name)
+        if tool_info is None:
             return create_error_response(f"Tool {tool_name} not found in registered tools")
-        
-        tool_info = registered_tools[tool_name]
-        
-        # If compression is enabled, generate compressed readme
-        if COMPRESS_TOOL_DEFINITIONS:
-            # Build registration data dict for compress_tool_definition
-            registration_data = {
-                #"tool_name": tool_name,
-                "description": tool_info.get("readme", tool_info.get("description", "")),
-                #"description": tool_info.get("description", ""),
-                #"readme": tool_info.get("readme"),
-                "parameters": tool_info.get("synthetic_parameters", {})
-                #"original_parameters": tool_info.get("original_parameters", ""),
-                #"real_parameters": tool_info.get("parameters", ""),
-                #"tool_info": tool_info,
-                #"callback_endpoint": tool_info.get("callback_endpoint", ""),
-                #"TOOL_API_KEY": tool_info.get("api_key", "")
-            }
-            
-            # Return the generated readme
-            return {
-                "content": [{"type": "text", "text": json.dumps(registration_data,default=str)}],
-                #"content": [{"type": "text", "text": wrapped_tool["readme"]}],
-                "isError": False
-            }
-        else:
-            # Return original description if compression disabled
-            original_description = tool_info.get("description", "No description available")
-            return {
-                "content": [{"type": "text", "text": original_description}],
-                "isError": False
-            }
-            
+
+        # Both fields below were generated together by compress_tool_definition at
+        # registration time, so this readme and the synthetic schema stay consistent.
+        registration_data = {
+            "description": tool_info.get("readme", tool_info.get("description", "")),
+            "parameters": tool_info.get("synthetic_parameters", {})
+        }
+
+        return {
+            "content": [{"type": "text", "text": json.dumps(registration_data, default=str, indent=2)}],
+            "isError": False
+        }
+
     except Exception as e:
         MCPLogger.log("REMOTE", f"Error in readme: {str(e)}\n{traceback.format_exc()}")
         return create_error_response(f"Error generating readme: {str(e)}")
@@ -382,152 +505,165 @@ def readme(input_param: Dict) -> Dict:
 def handle_remote(input_param: Dict) -> Dict:
     """
     This code has 3 different purposes:-
-    1. Handle remote-tool registration calls (from tools, not AIs)
-    2. Relay incoming tool-call requests coming in from (usually) AI agents out to registered remote tools.
-    3. Handle incoming tool-reply calls coming in from remote tools, and relay those back to the caller (in step 2)
+    1. Handle remote-tool registration/unregistration/listing calls (from tools, not AIs)
+    2. Relay incoming tool-call requests coming in from (usually) AI agents out to registered
+       remote tools - that path runs through create_remote_tool_handler's handler, which the
+       server dispatches to directly via server.tool_handlers.
+    3. Handle incoming tool-reply calls coming in from remote tools, and relay those back to
+       the caller in step 2.
 
-    Nope that possibly also other tools (e.g. settings.js) might call #2 as well (so *either* an AI or a human using a GUI can both do the same things)
-    
+    Dispatch is on explicit discriminators (request.method / input.operation), never on the
+    mere presence of handler_info (which the server injects into every tool call).
     """
     try:
-        MCPLogger.log("REMOTE", f"handle_remote input_param: {input_param}") #  REMOTE handle_remote input_param: {'request': {'method': 'tools/reply', 'params': {'name': 'tool_name', 'arguments': 'msg.value.parameters', 'original_msg': {'jsonrpc': '2.0', 'id': '8f860277-dffa-4a45-a322-8c7b597799e6', 'reverse': {'tool': 'browser', 'input': {'method': 'tools/call', 'params': {'name': 'browser', 'arguments': {'action': 'navigate', 'url': 'https://example.com'}}, 'jsonrpc': '2.0', 'id': 'eaa027e9-1b0e-42aa-a786-0d665a19f54f'}, 'call_id': '8f860277-dffa-4a45-a322-8c7b597799e6', 'isError': False}, 'mcpClient': {'baseUrl': 'https://127-0-0-1.local.aurafriday.com:31173', 'sseUrl': 'https://127-0-0-1.local.aurafriday.com:31173/sse?RAGTAG_API_KEY=rt-v1-put-your-real-key-kere', 'eventSource': {}, 'messageEndpoint': 'https://127-0-0-1.local.aurafriday.com:31173/messages/?session_id=c59a0cb4f733498ba2e318e90a3f1ae6', 'sessionId': None, 'reconnectDelay': 1000, 'reconnectTimer': None, 'lastRequestId': '8f860277-dffa-4a45-a322-8c7b597799e6'}}}, 'jsonrpc': '2.0', 'id': '8f860277-dffa-4a45-a322-8c7b597799e6'}, 'session_id': 'c59a0cb4f733498ba2e318e90a3f1ae6'}
-        if input_param.get("handler_info"): return register_tool(input_param) # special-case, this tool accepts both new-tool-registration and tool calls
+        if not isinstance(input_param, dict):
+            return create_error_response("Invalid input: expected an object")
 
-        MCPLogger.log("REMOTE", f"handle_remote registered_tools: {registered_tools}")
+        # Replies from remote tools: server.py routes tools/reply here as
+        # {'request': <jsonrpc request>, 'session_id': <replying session>}
+        request = input_param.get("request")
+        if isinstance(request, dict) and request.get("method") == "tools/reply":
+            return _handle_tool_reply(input_param)
 
-        # check for special-case tool-reply calls coming in from server.py tools/reply here
-        if input_param.get("request", {}).get("method") == "tools/reply":
-            # Extract the call_id from the incoming reply
-            call_id = input_param.get("request", {}).get("id")
-            MCPLogger.log("REMOTE", f"handle_remote call_id: {call_id}")
-            MCPLogger.log("REMOTE", f"handle_remote pending_tool_calls: {pending_tool_calls}") # oops: handle_remote pending_tool_calls: {'d6665121-8b50-48e2-b13e-d68ff6ccb3a3': {'action': 'navigate', 'url': 'https://example.com'}}
-            
-            if call_id and call_id in pending_tool_calls:
-                # Retrieve the stored context and remove it from pending calls
-                call_context = pending_tool_calls.pop(call_id)
-                MCPLogger.log("REMOTE", f"handle_remote call_context: {call_context}") # handle_remote call_context: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'tool_name': 'browser', 'session_id': '7819d3192b7b46e0864b936875e5522f', 'request_id': 'ce936182-4dda-47ab-aa20-52ea146477a8', 'client': <easy_mcp.server.MCPSession object at 0x00000231F6CA4440>, 'responder': <easy_mcp.server.MCPServer object at 0x00000231569BF230>}}
-                tool_args = call_context.get('tool_args', {})
-                
-                MCPLogger.log("REMOTE", f"Processing tool reply for call_id {call_id}, retrieved tool_args: {tool_args}")
-                result=input_param.get("request", {}).get("params", {}).get("result", {"content": [{"type": "text", "text": f"(no result provided)"}],"isError": True}) 
-                
-                # Check if result indicates an error and contains "{see readme}" to replace with actual readme
-                if result.get("isError") and "content" in result:
-                    tool_name = call_context["handler_info"]["tool_name"]
-                    
-                    # Check each content item for "{see readme}"
-                    for content_item in result["content"]:
-                        if content_item.get("type") == "text" and "{see readme}" in content_item.get("text", ""):
-                            MCPLogger.log("REMOTE", f"Found {{see readme}} in error response for {tool_name}, replacing with actual readme")
-                            
-                            # Create a temporary tool_args with the handler_info to call readme
-                            temp_tool_args = {
-                                "input": {"operation": "readme"},
-                                "handler_info": call_context["handler_info"]
-                            }
-                            
-                            # Get the readme content
-                            readme_response = readme(temp_tool_args)
-                            
-                            # Extract the readme text
-                            readme_text = ""
-                            if readme_response and not readme_response.get("isError", False):
-                                readme_content = readme_response.get("content", [])
-                                if readme_content and len(readme_content) > 0:
-                                    readme_text = readme_content[0].get("text", "")
-                            
-                            # Replace {see readme} with actual readme content
-                            if readme_text:
-                                content_item["text"] = content_item["text"].replace("{see readme}", f"\n\nDocumentation:\n{readme_text}")
-                            else:
-                                content_item["text"] = content_item["text"].replace("{see readme}", "\n\n[Error: Could not retrieve readme documentation]")
-                
-                # Send the response
-                response = {
-                    "jsonrpc": "2.0",
-                    "id": call_context["handler_info"]["request_id"],
-                    "result": result
-                }
-                MCPLogger.log("REMOTE", f"handle_remote sending response: {BLU}{response}{NORM}")
-                MCPLogger.log("REMOTE", f"call_context.handler_info={call_context['handler_info']}") # grr
-                # call_context.handler_info.responder._send_response(call_context.handler_info.session_id, response) 
-                call_context["handler_info"]["responder"]._send_response(
-                    call_context["handler_info"]["session_id"],
-                    response
-                )
+        input_wrapper = input_param.get("input")
+        operation = input_wrapper.get("operation") if isinstance(input_wrapper, dict) else None
+        if operation == "register":
+            return handle_registration(input_param)
+        if operation == "unregister":
+            return handle_unregistration(input_param)
+        if operation == "list":
+            return handle_list_registered_tools(input_param)
 
-
-
-                #error_response = {
-                #    "jsonrpc": jsonrpc,
-                #    "id": request_id,
-                #    "error": {
-                #        "code": -32601,
-                #        "message": f"Code not written still"
-                #    }
-                #}
-                #self._send_response(session_id, error_response)
-
-                # Here we would process the reply and send it back to the original caller
-                # For now, just log that we successfully retrieved the context
-                return {
-                    "content": [{"type": "text", "text": f"Tool reply processed for call_id {call_id}"}],
-                    "isError": False
-                }
-            else:
-                return create_error_response(f"No pending call found for call_id: {call_id}")            
-
-        return create_error_response(f"Unfinished code: tool-call relaying is not yet finished.")            
-    
-        # TODO: work out which tool is needed, which client_socket that uses, then relay the call out to it.
-
-        #        message = 'data: {"jsonrpc": "2.0", "id": "11111111-b222-4333-8444-555555555555", "reverse": {"tool": "browser", "input": [{"type": "text", "text": "hello '+datetime.now().isoformat()+'"}], "isError": false}}\r\n\r\n'
-        #        self.client_socket.sendall(message.encode('utf-8'))
-        #        MCPLogger.log("Info",f"SSE hello Message to {self.client_address}: {message}")
-        #
-        # REMOTE handle_remote input_param: {'request': {'method': 'tools/reply', 'params': {'name': 'tool_name', 'arguments': 'msg.value.parameters', 'original_msg': {'jsonrpc': '2.0', 'id': '11111111-b222-4333-8444-555555555555', 'reverse': {'tool': 'browser', 'input': [{'type': 'text', 'text': 'hello 2025-06-21T00:30:27.282853'}], 'isError': False}, 'mcpClient': {'baseUrl': 'https://127-0-0-1.local.aurafriday.com:31173', 'sseUrl': 'https://127-0-0-1.local.aurafriday.com:31173/sse?RAGTAG_API_KEY=rt-v1-put-your-real-key-kere', 'eventSource': {}, 'messageEndpoint': 'https://127-0-0-1.local.aurafriday.com:31173/messages/?session_id=06aa9c716aca4c6f8c355594f433922a', 'sessionId': None, 'reconnectDelay': 1000, 'reconnectTimer': None, 'lastRequestId': '11111111-b222-4333-8444-555555555555'}}}, 'jsonrpc': '2.0', 'id': '11111111-b222-4333-8444-555555555555'}, 'session_id': '06aa9c716aca4c6f8c355594f433922a'}
-
+        return create_error_response(f"Unsupported remote operation: '{operation}'. Supported operations: register, unregister, list (plus internal tools/reply).")
 
     except Exception as e:
-        error_msg = f"Error processing registration request: {str(e)}"
+        error_msg = f"Error in remote tool dispatch: {str(e)}"
+        MCPLogger.log("REMOTE", f"Error: {error_msg}\n"+traceback.format_exc())
+        return create_error_response(error_msg)
+
+
+def _handle_tool_reply(input_param: Dict) -> Dict:
+    """Match a tools/reply to its pending call and forward the result to the original caller.
+
+    Replies do NOT arrive on the SSE session the reverse call was pushed down (the client
+    POSTs its tools/reply on a different /messages session), so we match a reply to its
+    pending call purely by call_id -- an unguessable per-call UUIDv4.
+    CHANGED 2026-07-20 (cnd request): removed the registrant-session equality gate below; it
+    could never match a real SSE reply, so it dropped every reply and timed the caller out.
+    """
+    replying_session_id = input_param.get("session_id")
+    request = input_param.get("request") or {}
+    call_id = request.get("id")
+    MCPLogger.log("REMOTE", f"tools/reply for call_id {call_id} from session {str(replying_session_id)[:8]}")
+
+    with _registry_and_pending_calls_lock:
+        pending_call_context = pending_tool_calls.pop(call_id, None) if call_id else None
+
+    if pending_call_context is None:
+        return create_error_response(f"No pending call found for call_id: {call_id}")
+
+    # From here on the pending entry is consumed: any processing failure must still make a
+    # best-effort attempt to answer the original caller.
+    try:
+        result = request.get("params", {}).get("result", {"content": [{"type": "text", "text": "(no result provided)"}], "isError": True})
+        if not isinstance(result, dict):
+            result = {"content": [{"type": "text", "text": str(result)}], "isError": False}
+
+        # Check if result indicates an error and contains "{see readme}" to replace with actual readme
+        if result.get("isError") and "content" in result:
+            tool_name = pending_call_context.get("tool_name")
+
+            # Check each content item for "{see readme}"
+            for content_item in result.get("content", []):
+                if isinstance(content_item, dict) and content_item.get("type") == "text" and "{see readme}" in content_item.get("text", ""):
+                    MCPLogger.log("REMOTE", f"Found {{see readme}} in error response for {tool_name}, replacing with actual readme")
+
+                    # Get the readme content
+                    readme_response = readme({}, default_tool_name=tool_name)
+
+                    # Extract the readme text
+                    readme_text = ""
+                    if readme_response and not readme_response.get("isError", False):
+                        readme_content = readme_response.get("content", [])
+                        if readme_content and len(readme_content) > 0:
+                            readme_text = readme_content[0].get("text", "")
+
+                    # Replace {see readme} with actual readme content
+                    if readme_text:
+                        content_item["text"] = content_item["text"].replace("{see readme}", f"\n\nDocumentation:\n{readme_text}")
+                    else:
+                        content_item["text"] = content_item["text"].replace("{see readme}", "\n\n[Error: Could not retrieve readme documentation]")
+
+        # Send the response to the original caller
+        response = {
+            "jsonrpc": "2.0",
+            "id": pending_call_context.get("request_id"),
+            "result": result
+        }
+        MCPLogger.log("REMOTE", f"Forwarding reply for call_id {call_id} (isError={result.get('isError')}) to caller session {str(pending_call_context.get('caller_session_id'))[:8]}")
+        server = get_server()
+        if server:
+            server._send_response(pending_call_context.get("caller_session_id"), response)
+        else:
+            MCPLogger.log("REMOTE", f"Warning: no server instance available to forward reply for call_id {call_id}")
+
+        return {
+            "content": [{"type": "text", "text": f"Tool reply processed for call_id {call_id}"}],
+            "isError": False
+        }
+    except Exception as reply_processing_error:
+        _send_json_rpc_error_to_original_caller(
+            pending_call_context,
+            f"Remote tool '{pending_call_context.get('tool_name')}' replied, but processing the reply failed: {reply_processing_error}"
+        )
+        error_msg = f"Error processing tool reply for call_id {call_id}: {reply_processing_error}"
         MCPLogger.log("REMOTE", f"Error: {error_msg}\n"+traceback.format_exc())
         return create_error_response(error_msg)
 
 
 # Convert a remote-tools schema into our compressed-wrapped equivalent.
-def compress_tool_definition(registration_data: Dict) -> Dict:
+def compress_tool_definition(registration_data: Dict, final_tool_name: str) -> Dict:
     """Convert a remote tool's registration data into a compressed wrapped tool definition.
     
     Args:
         registration_data: Complete registration dict with tool_name, description, parameters, etc.
+        final_tool_name: The conflict-resolved name the tool is actually registered under
         
     Returns:
         Wrapped tool definition suitable for MCP server registration
     """
-    # Constants
-    
     # Extract fields from registration data
-    tool_name = registration_data.get("tool_name", "unknown_tool_name") # e.g. browser
     original_description = registration_data.get("description", "(description missing)")
-    readme_field = registration_data.get("readme") # e.g. Read from and perform actions using the users actual desktop web browser.\n- use this anytime a user request can be solved using their local chromium-based browser or current sessions/accounts/credentials/cookies.
+    readme_field = registration_data.get("readme") # e.g. Read from and perform actions using the users actual desktop web browser.
     original_parameters = registration_data.get("parameters", {})
     
     # Determine AI-facing description (use readme if provided, otherwise generate default)
     if readme_field:
-        ai_description = readme_field.strip() # e.g.
+        ai_description = readme_field.strip()
     else:
-        ai_description = f'Use this tool when you need to access {tool_name} functionality'
+        ai_description = f'Use this tool when you need to access {final_tool_name} functionality'
     
     # Generate parameter examples from original schema
-    properties = original_parameters.get("properties", {})
-    required = original_parameters.get("required", [])
+    properties = original_parameters.get("properties", {}) if isinstance(original_parameters, dict) else {}
+    required = original_parameters.get("required", []) if isinstance(original_parameters, dict) else []
     
     param_examples = []
     for prop_name, prop_schema in properties.items():
+        if not isinstance(prop_schema, dict):
+            prop_schema = {}
         prop_type = prop_schema.get('type', 'string')
         prop_desc = prop_schema.get('description', '')
-        
-        if prop_type == 'string':
+        default_value = prop_schema.get('default')
+        enum_values = prop_schema.get('enum')
+
+        # Prefer the schema's own default, then its first enum value: agents copy examples
+        # literally, so a synthetic "example_action" on an enum-restricted property would
+        # guarantee a first-call failure.
+        if default_value is not None:
+            example_value = json.dumps(default_value)
+        elif isinstance(enum_values, list) and enum_values:
+            example_value = json.dumps(enum_values[0])
+        elif prop_type == 'string':
             example_value = f'"example_{prop_name}"'
         elif prop_type == 'number' or prop_type == 'integer':
             example_value = '123'
@@ -547,7 +683,7 @@ def compress_tool_definition(registration_data: Dict) -> Dict:
     
     # Create wrapped tool definition
     wrapped_tool = {
-        "name": tool_name,
+        "name": final_tool_name,
         "description": ai_description,
         "parameters": {
             "properties": {
@@ -560,58 +696,58 @@ def compress_tool_definition(registration_data: Dict) -> Dict:
             "type": "object"
         },
         "synthetic_parameters": {
+            # 'operation' is advisory. create_remote_tool_handler forwards whatever
+            # operation the caller sends straight through to the remote tool, so it must NOT be
+            # enum-restricted or required here - each remote tool names its own operation
+            # (e.g. execute_python) or uses a no-operation call form.
             "properties": {
                 "operation": {
                     "type": "string",
-                    "enum": ["readme", "execute"],
-                    "description": "Operation to perform"
+                    "description": "Use \"readme\" (no token required) to read this tool's documentation. For any other call, pass the tool's OWN operation value exactly as named in its documentation below - do NOT send the literal \"execute\". Omit this field entirely if the tool documents a call form that takes no operation."
                 },
                 "tool_unlock_token": {
                     "type": "string",
-                    "description": f"Security token, {TEST_TOKEN}, obtained from readme operation"
+                    "description": "Comprehension token proving you have read THIS tool's readme. Obtain it from this tool's own `operation: readme` reply -- the tool owns and rotates it. Required on every call except readme/get_unlock_token."
                 }
             },
-            "required": ["operation", "tool_unlock_token"],
+            "required": ["tool_unlock_token"],
             "type": "object"
         },
         "original_parameters": original_parameters,  # Store for validation
+        # This readme documents FLAT calling (send the tool's real operation, or
+        # none, directly inside 'input' alongside tool_unlock_token). The relay forwards every
+        # field verbatim.
         "readme": f"""## Available Operations
 
 ## Usage-Safety Token System
-This tool uses an hmac-based token system to ensure callers fully understand all details of
-using this tool, on every call. The token is specific to this installation, user, and code version.
-
-Your tool_unlock_token for this installation is: {TEST_TOKEN}
+This tool requires a tool_unlock_token: a COMPREHENSION GATE proving you have read THIS tool's
+current documentation. It is NOT a secret. Call {{"input": {{"operation": "readme"}}}} on THIS
+tool to get its current token; the tool OWNS the token and rotates it whenever the tool changes.
 
 You MUST include tool_unlock_token in the input dict for all operations except readme.
 
 ## Input Structure
-All parameters are passed in a single 'input' dict:
+All parameters are passed in a single 'input' dict.
 
-1. For this documentation:
-   {{
-     "input": {{"operation": "readme"}}
-   }}
+1. For this documentation (no token needed):
+   {{ "input": {{ "operation": "readme" }} }}
 
-2. For executing the tool:
-   {{
-     "input": {{
-       "operation": "execute", 
-       "tool_unlock_token": "{TEST_TOKEN}",
-       ... original tool parameters ...
-     }}
-   }}
+2. For every other call, pass the tool's parameters FLAT inside 'input',
+   with tool_unlock_token alongside them. Do NOT wrap them in an "execute" envelope.
+   Send the tool's OWN operation value directly:
+   {{ "input": {{ "operation": "<the tool's real operation>", "tool_unlock_token": "<token>", ...tool params... }} }}
+   ...or, if the tool documents a call form with no operation, just omit it:
+   {{ "input": {{ "tool_unlock_token": "<token>", ...tool params... }} }}
 
 ## Original Tool Documentation
 {original_description}
 
-## Execute Operation Parameters
-When using operation="execute", include the original tool parameters:
+## Parameters
+Pass these fields directly inside 'input' (alongside tool_unlock_token):
 
 {{
   "input": {{
-    "operation": "execute",
-    "tool_unlock_token": "{TEST_TOKEN}",
+    "tool_unlock_token": "<token>",
 {param_section}
   }}
 }}
@@ -622,7 +758,7 @@ When using operation="execute", include the original tool parameters:
 
 
 
-def register_tool(input_param: Dict) -> Dict:  # REMOTE handle_remote input_param: {'input': {'operation': 'register', 'tool_name': 'browser', 'description': 'Browser control tool that allows the MCP server to interact with web pages, navigate, click elements, extract content, and perform other browser automation tasks through the MCP Link extension.', 'readme': 'Read from and perform actions using the users actual desktop web browser.\n- use this anytime a user request can be solved using their local chromium-based browser.', 'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['navigate', 'click', 'extract_text', 'extract_html', 'scroll', 'wait', 'screenshot', 'evaluate_js'], 'description': 'The browser action to perform'}, 'url': {'type': 'string', 'description': "URL to navigate to (required for 'navigate' action)"}, 'selector': {'type': 'string', 'description': "CSS selector for element to interact with (required for 'click', 'extract_text' actions)"}, 'javascript_code': {'type': 'string', 'description': "JavaScript code to evaluate in the page context (required for 'evaluate_js' action)"}, 'wait_timeout_ms': {'type': 'integer', 'default': 5000, 'description': "Maximum time to wait in milliseconds (for 'wait' action or element waiting)"}, 'scroll_direction': {'type': 'string', 'enum': ['up', 'down', 'top', 'bottom'], 'default': 'down', 'description': "Direction to scroll (for 'scroll' action)"}}, 'required': ['action']}, 'callback_endpoint': 'chrome-extension://browser-tool-callback', 'TOOL_API_KEY': 'mcp_link_extension_browser_tool_auth_key_placeholder'}, 'handler_info': {'tool_name': 'remote', 'session_id': '65fa873198b74a3fbaa83de6e5c69a77', 'request_id': 'f30301f9-c418-441e-a96f-ca56e71dc8dd', 'client': <easy_mcp.server.MCPSession object at 0x0000019A763639D0>, 'responder': <easy_mcp.server.MCPServer object at 0x0000019A76377380>}} 
+def handle_registration(input_param: Dict) -> Dict:
     """Handle tool registration via MCP interface.
     
     Args:
@@ -633,23 +769,27 @@ def register_tool(input_param: Dict) -> Dict:  # REMOTE handle_remote input_para
     """
     try:
         # Pop off synthetic handler_info parameter early (before validation)
-        MCPLogger.log("REMOTE", f"register_tool: {input_param}")
-
-        handler_info = input_param.pop('handler_info', {}) if isinstance(input_param, dict) else {}   # {'tool_name': 'remote', 'session_id': '65fa873198b74a3fbaa83de6e5c69a77', 'request_id': 'f30301f9-c418-441e-a96f-ca56e71dc8dd', 'client': <easy_mcp.server.MCPSession object at 0x0000019A763639D0>, 'responder': <easy_mcp.server.MCPServer object at 0x0000019A76377380>}
+        handler_info = input_param.pop('handler_info', {}) if isinstance(input_param, dict) else {}
 
         # Extract the actual parameters from the "input" wrapper
         if isinstance(input_param, dict) and "input" in input_param:
             actual_params = input_param["input"]
         else:
             return create_error_response("Invalid input format. Expected dictionary with 'input' key containing tool parameters.")
-        
+        if not isinstance(actual_params, dict):
+            return create_error_response("Invalid input format. 'input' must be an object containing tool parameters.")
+
+        # Do not log registrant-supplied values here: they include TOOL_API_KEY (a secret)
+        # and possibly very large readme/description text.
+        MCPLogger.log("REMOTE", f"register request for tool_name '{actual_params.get('tool_name')}' with keys: {sorted(actual_params.keys())}")
+
         # Validate operation parameter
         operation = actual_params.get("operation")
         if operation != "register":
-            return create_error_response(f"Invalid operation: '{operation}'. Only 'register' operation is supported.")
+            return create_error_response(f"Invalid operation: '{operation}'. Only 'register' operation is supported here.")
 
-        # Validate required parameters
-        required_params = ["tool_name", "description", "parameters", "callback_endpoint", "TOOL_API_KEY"]
+        # Validate required parameters (callback_endpoint is optional metadata)
+        required_params = ["tool_name", "description", "parameters", "TOOL_API_KEY"]
         for param in required_params:
             if param not in actual_params:
                 return create_error_response(f"Missing required parameter: {param}")
@@ -658,8 +798,9 @@ def register_tool(input_param: Dict) -> Dict:  # REMOTE handle_remote input_para
         base_tool_name = actual_params.get("tool_name")
         description = actual_params.get("description")
         parameters = actual_params.get("parameters")
-        callback_endpoint = actual_params.get("callback_endpoint")
+        callback_endpoint = actual_params.get("callback_endpoint", "")
         api_key = actual_params.get("TOOL_API_KEY")
+        readme_field = actual_params.get("readme")
         
         # Basic validation
         if not isinstance(base_tool_name, str) or not base_tool_name.strip():
@@ -671,143 +812,158 @@ def register_tool(input_param: Dict) -> Dict:  # REMOTE handle_remote input_para
         if not isinstance(parameters, dict):
             return create_error_response("parameters must be a valid JSON object/dictionary")
         
-        if not isinstance(callback_endpoint, str) or not callback_endpoint.strip():
-            return create_error_response("callback_endpoint must be a non-empty string")
-        
+        if callback_endpoint is not None and not isinstance(callback_endpoint, str):
+            return create_error_response("callback_endpoint, when provided, must be a string")
+        callback_endpoint = (callback_endpoint or "").strip()
+
         if not isinstance(api_key, str) or not api_key.strip():
             return create_error_response("TOOL_API_KEY must be a non-empty string")
 
-        # Check and cleanup any existing tools with the same name that have dead connections
+        if readme_field is not None and not isinstance(readme_field, str):
+            return create_error_response("readme, when provided, must be a string")
+
+        # Conservative name charset: spaces/unicode/slashes in tool names break MCP clients
         cleaned_tool_name = base_tool_name.strip()
-        if cleaned_tool_name in registered_tools:
-            MCPLogger.log("REMOTE", f"Tool {cleaned_tool_name} already exists, checking if connection is still alive...")
-            
-            # Get the existing tool's session info
-            existing_tool_info = registered_tools[cleaned_tool_name]
-            existing_session_id = existing_tool_info.get('handler_info', {}).get('session_id')
-            
-            if existing_session_id:
-                # Get server instance to check connection
-                server = get_server()
-                if server and existing_session_id in server.active_sessions:
-                    existing_session = server.active_sessions[existing_session_id]
-                    
-                    # Check if the connection is still alive
-                    if not existing_session.is_socket_connected():
-                        MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} has dead connection, removing it...")
-                        
-                        # Remove the old tool with dead connection
-                        del registered_tools[cleaned_tool_name]
-                        
-                        # Remove from server's tool_handlers
-                        if cleaned_tool_name in server.tool_handlers:
-                            del server.tool_handlers[cleaned_tool_name]
-                            MCPLogger.log("REMOTE", f"Removed dead tool {cleaned_tool_name} from server handlers")
-                        
-                        MCPLogger.log("REMOTE", f"Successfully cleaned up dead tool {cleaned_tool_name}")
-                    else:
-                        MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} connection is still alive, will resolve naming conflict")
-                else:
-                    # Session not found in active_sessions, it's dead
-                    MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} session {existing_session_id} not found in active sessions, removing it...")
-                    
-                    # Remove the old tool with dead session
-                    del registered_tools[cleaned_tool_name]
-                    
-                    # Remove from server's tool_handlers
-                    server = get_server()
-                    if server and cleaned_tool_name in server.tool_handlers:
-                        del server.tool_handlers[cleaned_tool_name]
-                        MCPLogger.log("REMOTE", f"Removed dead tool {cleaned_tool_name} from server handlers")
-                    
-                    MCPLogger.log("REMOTE", f"Successfully cleaned up dead tool {cleaned_tool_name} (session not found)")
-            else:
-                MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} has no session info, removing it...")
-                
-                # Remove the old tool with no session info
-                del registered_tools[cleaned_tool_name]
-                
-                # Remove from server's tool_handlers
-                server = get_server()
-                if server and cleaned_tool_name in server.tool_handlers:
-                    del server.tool_handlers[cleaned_tool_name]
-                    MCPLogger.log("REMOTE", f"Removed tool {cleaned_tool_name} with no session info from server handlers")
+        if not REMOTE_TOOL_NAME_PATTERN.match(cleaned_tool_name):
+            return create_error_response("tool_name must match ^[A-Za-z0-9_-]{1,64}$")
 
-        # Resolve naming conflicts (after cleanup, this might not be needed)
-        final_tool_name = resolve_tool_name_conflict(cleaned_tool_name)
-        
-        if COMPRESS_TOOL_DEFINITIONS:
-            MCPLogger.log(f"REMOTE", f"compressing tool definition {YEL}{actual_params}{NORM}")
-            final_params = compress_tool_definition(actual_params) # e.g.
-            temp_readme=final_params.get("readme")
-            # un-swap before re-swap
-            #final_params["readme"]=final_params.get("description")
-            #final_params["description"]=temp_readme
-            MCPLogger.log("REMOTE", f"compressed tool definition to {final_params}")
-        else:
-            final_params = actual_params
+        # Size caps: registrant-supplied text flows into every AI conversation
+        if len(description) > MAX_DESCRIPTION_LENGTH:
+            return create_error_response(f"description too long ({len(description)} chars; max {MAX_DESCRIPTION_LENGTH})")
+        if readme_field is not None and len(readme_field) > MAX_README_LENGTH:
+            return create_error_response(f"readme too long ({len(readme_field)} chars; max {MAX_README_LENGTH})")
+        try:
+            parameters_json_size = len(json.dumps(parameters))
+        except (TypeError, ValueError):
+            return create_error_response("parameters must be JSON-serializable")
+        if parameters_json_size > MAX_PARAMETERS_JSON_LENGTH:
+            return create_error_response(f"parameters schema too large ({parameters_json_size} chars serialized; max {MAX_PARAMETERS_JSON_LENGTH})")
 
-        # Register the tool in our internal registry
-        registered_tools[final_tool_name] = {
-            "description": final_params.get("description").strip(),
-            "parameters": final_params.get("parameters"),
-            "synthetic_parameters": final_params.get("synthetic_parameters"),
-            "callback_endpoint": callback_endpoint.strip(),
-            "api_key": api_key.strip(),
-            "readme": final_params.get("readme"),
-            "registered_at": time.time(),
-            "handler_info": handler_info # is session_id in here is the client, not the tool-connection, from cursor???
-            #"session_id": 2
+        registered_by = get_authenticated_user(handler_info)
+
+        # Keep only plain fields from handler_info: storing the live MCPSession/MCPServer
+        # objects would pin them in memory, and the relay looks sessions up by id anyway.
+        registrant_handler_info = {
+            "tool_name": handler_info.get("tool_name"),
+            "session_id": handler_info.get("session_id"),
+            "request_id": handler_info.get("request_id")
         }
-        
-        # Get the server instance and register the tool with it
-        server = get_server()
-        if server:
-            # Register cleanup callback on first tool registration
-            global _cleanup_callback_registered
-            if not _cleanup_callback_registered:
-                try:
-                    server.register_session_cleanup_callback(cleanup_tools_for_session)
-                    _cleanup_callback_registered = True
-                    MCPLogger.log("REMOTE", "Successfully registered session cleanup callback")
-                except Exception as e:
-                    MCPLogger.log("REMOTE", f"Error registering session cleanup callback: {str(e)}")
-            
-            # Create a handler for this remote tool
-            handler = create_remote_tool_handler(final_tool_name, callback_endpoint.strip(), api_key.strip())
-            
-            # Register with the MCP server so it appears in tools/list
-            server.register_tool(
-                name=final_tool_name,
-                description=registered_tools[final_tool_name].get("description").strip(),
-                input_schema=registered_tools[final_tool_name].get("parameters"),
-                handler=handler
-            )
 
-            # "tool_unlock_token": { "type": "string", "description": "Security token obtained from readme documentation" }
-            # "parameters": { "properties": { "input": { "type": "object", "description": "All tool parameters are passed in this single dict. Use {\"input\":{\"readme\":true}} to get full documentation, parameters, and an unlock token." } }, "required": [], "type": "object" },
-            
-            MCPLogger.log("REMOTE", f"Successfully registered tool with MCP server: {final_tool_name} rego={registered_tools[final_tool_name]}")
-        else:
-            MCPLogger.log("REMOTE", f"Warning: No server instance available, tool {final_tool_name} only stored in internal registry")
-        
-        # Log successful registration
-        MCPLogger.log("REMOTE", f"Successfully registered tool: {final_tool_name}")                          # browser
-        MCPLogger.log("REMOTE", f"  Description: {registered_tools[final_tool_name].get('description')[:100]}...")
-        MCPLogger.log("REMOTE", f"  Parameters: {registered_tools[final_tool_name].get('parameters')}")
-        MCPLogger.log("REMOTE", f"  Callback: {callback_endpoint} full={registered_tools[final_tool_name]}") # full={'description': 'Browser control tool that allows the MCP server to interact with web pages, navigate, click elements, extract content, and perform other browser automation tasks through the MCP Link extension.', 'parameters': {'type': 'object', 'properties': {'action': {'type': 'string', 'enum': ['navigate', 'click', 'extract_text', 'extract_html', 'scroll', 'wait', 'screenshot', 'evaluate_js'], 'description': 'The browser action to perform'}, 'url': {'type': 'string', 'description': "URL to navigate to (required for 'navigate' action)"}, 'selector': {'type': 'string', 'description': "CSS selector for element to interact with (required for 'click', 'extract_text' actions)"}, 'javascript_code': {'type': 'string', 'description': "JavaScript code to evaluate in the page context (required for 'evaluate_js' action)"}, 'wait_timeout_ms': {'type': 'integer', 'default': 5000, 'description': "Maximum time to wait in milliseconds (for 'wait' action or element waiting)"}, 'scroll_direction': {'type': 'string', 'enum': ['up', 'down', 'top', 'bottom'], 'default': 'down', 'description': "Direction to scroll (for 'scroll' action)"}}, 'required': ['action']}, 'callback_endpoint': 'chrome-extension://browser-tool-callback', 'api_key': 'mcp_link_extension_browser_tool_auth_key_placeholder', 'readme': 'Read from and perform actions using the users actual desktop web browser.\n- use this anytime a user request can be solved using their local chromium-based browser.', 'registered_at': 1750508378.0326962, 'handler_info': {'tool_name': 'remote', 'session_id': '2224b155a8464d2081c65fabcd941981', 'request_id': '79380100-4901-4878-96dc-18571966db90', 'client': <easy_mcp.server.MCPSession object at 0x0000023BC72679D0>, 'responder': <easy_mcp.server.MCPServer object at 0x0000023BC7277380>}}
-        MCPLogger.log("REMOTE", f"  Total registered tools: {len(registered_tools)}")
+        replaced_existing_registration = False
+        with _registry_and_pending_calls_lock:
+            if cleaned_tool_name in registered_tools:
+                existing_tool_info = registered_tools[cleaned_tool_name]
+                existing_session_id = existing_tool_info.get('handler_info', {}).get('session_id')
 
+                server_for_liveness = get_server()
+                existing_session = server_for_liveness.active_sessions.get(existing_session_id) if (server_for_liveness and existing_session_id) else None
+                existing_connection_is_alive = existing_session is not None and existing_session.is_socket_connected()
+
+                same_api_key = existing_tool_info.get('api_key') == api_key.strip()
+                same_callback = bool(callback_endpoint) and existing_tool_info.get('callback_endpoint') == callback_endpoint
+
+                if same_api_key or same_callback:
+                    # Same origin re-registering (e.g. extension reconnected before its old
+                    # socket was detected dead): replace it and keep the canonical name.
+                    MCPLogger.log("REMOTE", f"Tool {cleaned_tool_name} re-registered by same origin, replacing previous registration")
+                    _unregister_tool_assuming_lock_held(cleaned_tool_name)
+                    replaced_existing_registration = True
+                elif not existing_connection_is_alive:
+                    MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} has a dead connection, removing it")
+                    _unregister_tool_assuming_lock_held(cleaned_tool_name)
+                else:
+                    MCPLogger.log("REMOTE", f"Existing tool {cleaned_tool_name} is alive and belongs to a different origin, will resolve naming conflict")
+
+            # Resolve naming conflicts against BOTH remote and built-in tools
+            final_tool_name = resolve_tool_name_conflict(cleaned_tool_name)
+
+            # PURE RELAY: the server no longer mints a token for the tool. The tool owns and serves
+            # its own token via its readme (and validates it tool-side). We keep only the wrapped
+            # description/schema for tools/list; no token is embedded or stored here.
+            final_params = compress_tool_definition(actual_params, final_tool_name)
+
+            # Validate the compressed definition's shape before trusting it
+            wrapped_description = (final_params.get("description") or "").strip()
+            wrapped_parameters = final_params.get("parameters")
+            wrapped_synthetic_parameters = final_params.get("synthetic_parameters")
+            wrapped_readme = final_params.get("readme")
+            if not wrapped_description or not isinstance(wrapped_parameters, dict) or not isinstance(wrapped_synthetic_parameters, dict) or not isinstance(wrapped_readme, str):
+                return create_error_response("Internal error: compressed tool definition is malformed")
+
+            # Register the tool in our internal registry
+            registered_tools[final_tool_name] = {
+                "description": wrapped_description,
+                "parameters": wrapped_parameters,
+                "synthetic_parameters": wrapped_synthetic_parameters,
+                "original_parameters": final_params.get("original_parameters") or {},
+                "callback_endpoint": callback_endpoint,
+                "api_key": api_key.strip(),
+                "readme": wrapped_readme,
+                "registered_at": time.time(),
+                "registered_by": registered_by,
+                "handler_info": registrant_handler_info # the registrant's own session (relay target + cleanup key)
+            }
+
+            # Get the server instance and register the tool with it
+            server = get_server()
+            if server:
+                # Register cleanup callback on first tool registration
+                global _cleanup_callback_registered
+                if not _cleanup_callback_registered:
+                    try:
+                        server.register_session_cleanup_callback(cleanup_tools_for_session)
+                        _cleanup_callback_registered = True
+                        MCPLogger.log("REMOTE", "Successfully registered session cleanup callback")
+                    except Exception as e:
+                        MCPLogger.log("REMOTE", f"Error registering session cleanup callback: {str(e)}")
+
+                # Create a handler for this remote tool and register it with the MCP
+                # server so it appears in tools/list
+                server.register_tool(
+                    name=final_tool_name,
+                    description=wrapped_description,
+                    input_schema=wrapped_parameters,
+                    handler=create_remote_tool_handler(final_tool_name)
+                )
+            else:
+                MCPLogger.log("REMOTE", f"Warning: No server instance available, tool {final_tool_name} only stored in internal registry")
+
+            total_registered_tool_count = len(registered_tools)
+
+        # Log successful registration (names/sizes only - no api_key, no full dumps)
+        MCPLogger.log("REMOTE", f"Successfully registered tool: {final_tool_name} (requested '{cleaned_tool_name}', replaced={replaced_existing_registration}, registered_by={registered_by}, session {str(handler_info.get('session_id'))[:8]})")
+        MCPLogger.log("REMOTE", f"  Description length: {len(wrapped_description)}, schema properties: {sorted((parameters.get('properties') or {}).keys()) if isinstance(parameters.get('properties'), dict) else '(none)'}")
+        MCPLogger.log("REMOTE", f"  Total registered tools: {total_registered_tool_count}")
+
+        # Persist this tool name into tool_visibility config (default enabled=1)
+        # so the UI can show it even after the remote tool disconnects.
+        # (SharedConfigManager caches reads and debounces disk writes, so this is cheap.)
+        try:
+            from ragtag.shared_config import get_config_manager, SharedConfigManager
+            config_manager_for_tool_vis = get_config_manager()
+            config_for_tool_vis = config_manager_for_tool_vis.load_config()
+            tool_visibility_section = SharedConfigManager.get_settings_value(config_for_tool_vis, 'tool_visibility', default={})
+            if final_tool_name not in tool_visibility_section:
+                tool_visibility_section[final_tool_name] = 1
+                SharedConfigManager.set_settings_value(config_for_tool_vis, 'tool_visibility', tool_visibility_section)
+                config_manager_for_tool_vis.save_config(config_for_tool_vis)
+                MCPLogger.log("REMOTE", f"Added '{final_tool_name}' to tool_visibility config (enabled=1)")
+        except Exception as tool_vis_persist_error:
+            MCPLogger.log("REMOTE", f"Warning: failed to persist tool_visibility for '{final_tool_name}': {tool_vis_persist_error}")
+        
         # Trigger Cursor IDE to reconnect so it can see the newly registered tool
         trigger_cursor_reconnect_for_tool_changes()
         
-        # Prepare success response
-        response_text = f"Successfully registered tool: {final_tool_name}"
-        if final_tool_name != base_tool_name:
-            response_text += f" (renamed from {base_tool_name} due to naming conflict)"
-        
+        # Structured response: registrants are programs and need the final (conflict-resolved)
+        # name. NO tool_unlock_token is returned -- the tool OWNS its token and reveals it ONLY via
+        # its own readme operation (see the pure-relay note at the top of this file).
+        registration_response = {
+            "registered_name": final_tool_name,
+            "renamed_from": cleaned_tool_name if final_tool_name != cleaned_tool_name else None,
+            "replaced": replaced_existing_registration
+        }
         return {
-            "content": [{"type": "text", "text": response_text}],
+            "content": [{"type": "text", "text": json.dumps(registration_response, indent=2)}],
             "isError": False
         }
             
@@ -816,25 +972,73 @@ def register_tool(input_param: Dict) -> Dict:  # REMOTE handle_remote input_para
         MCPLogger.log("REMOTE", f"Error: {error_msg}\n"+traceback.format_exc())
         return create_error_response(error_msg)
 
+
+def handle_unregistration(input_param: Dict) -> Dict:
+    """Remove one registered remote tool, authenticated by the TOOL_API_KEY used at registration."""
+    try:
+        if isinstance(input_param, dict):
+            input_param.pop('handler_info', None)
+        actual_params = input_param.get("input") if isinstance(input_param, dict) else None
+        if not isinstance(actual_params, dict):
+            return create_error_response("Invalid input format. Expected dictionary with 'input' key containing tool parameters.")
+
+        tool_name = actual_params.get("tool_name")
+        api_key = actual_params.get("TOOL_API_KEY")
+        if not isinstance(tool_name, str) or not tool_name.strip() or not isinstance(api_key, str) or not api_key.strip():
+            return create_error_response("unregister requires tool_name and TOOL_API_KEY")
+        tool_name = tool_name.strip()
+
+        with _registry_and_pending_calls_lock:
+            tool_info = registered_tools.get(tool_name)
+            unregistration_is_authorized = bool(tool_info) and tool_info.get('api_key') == api_key.strip()
+            if unregistration_is_authorized:
+                _unregister_tool_assuming_lock_held(tool_name)
+
+        if not unregistration_is_authorized:
+            # Same message for unknown-name and key-mismatch: no oracle for probing names/keys
+            return create_error_response(f"Cannot unregister '{tool_name}': unknown tool or TOOL_API_KEY mismatch")
+
+        trigger_cursor_reconnect_for_tool_changes()
+        return {
+            "content": [{"type": "text", "text": json.dumps({"unregistered": tool_name}, indent=2)}],
+            "isError": False
+        }
+    except Exception as e:
+        error_msg = f"Error processing unregistration request: {str(e)}"
+        MCPLogger.log("REMOTE", f"Error: {error_msg}\n"+traceback.format_exc())
+        return create_error_response(error_msg)
+
+
+def handle_list_registered_tools(input_param: Dict) -> Dict:
+    """List registered remote tools with liveness info (for UI/debugging). No secrets included."""
+    try:
+        with _registry_and_pending_calls_lock:
+            registry_snapshot = [(tool_name, tool_info) for tool_name, tool_info in registered_tools.items()]
+
+        server = get_server()
+        tool_entries = []
+        for tool_name, tool_info in registry_snapshot:
+            session_id = tool_info.get('handler_info', {}).get('session_id')
+            session = server.active_sessions.get(session_id) if (server and session_id) else None
+            tool_entries.append({
+                "name": tool_name,
+                "registered_at": tool_info.get("registered_at"),
+                "session_alive": bool(session) and session.is_active,
+                "callback_endpoint": tool_info.get("callback_endpoint", ""),
+                "registered_by": tool_info.get("registered_by")
+            })
+
+        return {
+            "content": [{"type": "text", "text": json.dumps({"registered_tools": tool_entries}, indent=2)}],
+            "isError": False
+        }
+    except Exception as e:
+        error_msg = f"Error listing registered tools: {str(e)}"
+        MCPLogger.log("REMOTE", f"Error: {error_msg}\n"+traceback.format_exc())
+        return create_error_response(error_msg)
+
+
 # Map of tool names to their handlers
 HANDLERS = {
     "remote": handle_remote
 }
-
-# Note: Session cleanup callback registration happens in __init__.py during tool discovery
-# because this module's bottom section doesn't execute during normal tool loading
-
-
-""" Tools calls look like this:-
-
-2025-06-20 10:50:19.383 [PID:23540|TID:39168] Request from ('127.0.0.1', 55963) < Method: POST Path: /messages/?session_id=2ac6884a5bde4c05bb3247e42e7ff134\nHeaders: 
-{'host': '127-0-0-1.local.aurafriday.com:31173', 'connection': 'keep-alive', 'content-type': 'application/json', 'accept': '*/*', 'accept-language': '*', 'sec-fetch-mode': 'cors', 'user-agent': 'node', 'accept-encoding': 'br, gzip, deflate', 'content-length': '136'}\n
-Body length: 136\n
-Body: b'{"method":"tools/call","params":{"name":"browser","arguments":{"action":"navigate","url":"https://example.com"}},"jsonrpc":"2.0","id":2}'
-
-2025-06-20 10:50:19.384 [PID:23540|TID:39168] JSONRPC Request session=2ac6884a5bde4c05bb3247e42e7ff134, method=tools/call, id=2
-2025-06-20 10:50:19.384 [PID:23540|TID:39168] REMOTE Tool browser args: {'action': 'navigate', 'url': 'https://example.com', 'handler_info': {'browser': 'browser'}}
-2025-06-20 10:50:19.385 [PID:23540|TID:39168] SSE Message to ('127.0.0.1', 55921) > data: {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text", "text": "work-in-progress (this tool is not yet fully implemented)"}], "isError": false}}\r\n\r\n
-2025-06-20 10:50:19.386 [PID:23540|TID:39168] Response  to ('127.0.0.1', 55963) > b'HTTP/1.1 202 Accepted\r\nContent-Type: text/plain\r\nContent-Length: 0\r\nConnection: close\r\nAccess-Control-Allow-Origin: null\r\nAccess-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Credentials: true\r\nAccess-Control-Max-Age: 86400\r\n\r\n'
-
-"""
