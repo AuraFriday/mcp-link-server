@@ -52,10 +52,10 @@ This repository is subject to a strict proprietary license.
 1. **Download the Installer**
    - Visit [GitHub Releases](https://github.com/AuraFriday/mcp-link-server/releases/tag/latest)
    - Download the installer for your platform:
-     - **Windows**: `AuraFriday-mcp-link-server-setup-v1.2.72-windows-x86_64.exe`
-     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.2.72-mac-intel.pkg`
-     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.2.72-mac-arm.pkg`
-     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.2.72-linux-x86_64.run`
+     - **Windows**: `aurafriday_downloader.exe`
+     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.3.08-mac-intel.pkg`
+     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.3.08-mac-arm.pkg`
+     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.3.08-linux-x86_64.run`
      - **Checksums**: [checksums.txt](checksums.txt)
 
 2. **Run the Installer**
@@ -139,10 +139,10 @@ This server delivers a comprehensive MCP implementation with powerful tool capab
 
 | Component         | Purpose                                                          |
 | ----------------- | ---------------------------------------------------------------- |
-| `server/`         | Core MCP SSE server engine (Python 3.9+) for tool execution     |
+| `server/`         | Core MCP SSE server engine (Python 3.9+) for tool execution      |
 | `tools/`          | Built-in tool implementations for files, system, browser, etc    |
 | `plugins/`        | Extensible plugin system for custom tool development             |
-| `config/`         | Configuration management and security policies                    |
+| `config/`         | Configuration management and security policies                   |
 | `docker/`         | Docker integration for sandboxed tool execution                  |
 | `api/`            | RESTful API endpoints for external integrations                  |
 | `docs/`           | Comprehensive documentation and tool specifications              |
@@ -218,34 +218,60 @@ The server only advertises tools that are explicitly enabled and can **never exe
 
 These tools run directly on your machine with no external dependencies. All processing happens locally for maximum security and privacy:
 
-| 🛠️ Tool ID         | ⚡ Description                                  | 🔓 Access    |
-| ------------------- | ---------------------------------------------- | ------------ |
-| `filesystem`        | Read, write, and manage files on your system   | ✅ Free      |
-| `terminal`          | Execute system commands and scripts            | ✅ Free      |
-| `browser`           | Automate web browsers via extension bridge     | ✅ Free      |
-| `sqlite`            | SQL queries with **semantic search** & vector embeddings | ✅ Free      |
-| `docker`            | **Sandbox tools in secure containers**         | ✅ Critical  |
-
-> 🔐 **Docker integration** is a key security feature. The server can route tool calls into **containerized environments**, eliminating risk of unauthorized system access while enabling safe, powerful AI automation.
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
+| `fs`                | Filesystem, search & diagnostics: read, write, edit, delete, glob, grep, code search, web search, lints, file transfer | ✅ Free   |
+| `terminal`          | Persistent PuTTY-like terminal via SSH, serial, telnet, TCP, WebSocket, Bluetooth, RFC2217, pipes, or STDIO | ✅ Free   |
+| `chrome_browser`    | Full Chrome API: browser automation, casting, TTS, downloads, bookmarks, history, and arbitrary JS execution (via [extension](https://chromewebstore.google.com/detail/mcp-link/ddgfpbfaplmbjnipblicgkkfipnmflkf)) | ✅ Free   |
+| `sqlite`            | SQL queries with **semantic similarity search** & automatic vector embedding generation               | ✅ Free   |
+| `system`            | OS automation for Windows, macOS, and Linux -- desktop, applications, and GUI control                | ✅ Free   |
+| `python`            | Execute Python code locally with built-in MCP tool integration (call any other tool from Python)     | ✅ Free   |
 
 ---
 
-### 🧩 Extended Tools (Advanced Features & Integrations)
+### 🧠 AI & Voice Tools
 
-Additional tools are available through plugins or premium features for enhanced AI capabilities:
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access     |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | ------------- |
+| `llm`               | Unified LLM chat completions: local models (Ollama, llama.cpp, transformers), OpenRouter, cloud APIs, multimodal/vision | ✅ Free / API key |
+| `agent`             | Persistent autonomous AI agent runtime -- create, control, and interact with always-on agents        | ✅ Free       |
+| `tts`               | Text-to-speech via ElevenLabs, Deepgram, or Google Cloud (or free via browser extension)             | ✅ API key    |
+| `stt`               | Speech-to-text from microphone input or audio files                                                  | ✅ Free       |
+| `context7`          | Up-to-date library documentation and code examples for any framework                                 | ✅ Free       |
 
-| 🛠️ Tool ID    | ⚡ Description                                                | 🔓 Access    |
-| -------------- | ------------------------------------------------------------ | ------------ |
-| `cards`        | Draws random cards for agent decision-making                 | ✅ Free       |
-| `tts`          | Text-to-speech using system audio                            | ✅ Free       |
-| `stt`          | Speech-to-text from microphone input                         | ✅ Free       |
-| `whatsapp`     | Sends messages via WhatsApp automation                       | 🔐 Licensed  |
-| `openrouter`   | Proxies multiple AI models via API integration               | ✅ Configured |
-| `ai_chat`      | Enables multi-agent chat coordination                        | 🔐 Licensed  |
-| `network`      | HTTP requests and API integrations                           | ✅ Free       |
-| `crypto`       | Secure encryption and signing operations                     | ✅ Free       |
+---
 
-More tools are continuously added through the plugin system. Core tools are free, while premium integrations may require licensing or API keys.
+### 🌐 Multi-Device & Networking
+
+Connect and control all your devices through a secure encrypted mesh:
+
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
+| `den`               | Securely share MCP tools between machines over iroh -- each side appears as a callable umbrella tool | ✅ Free   |
+| `tunnel`            | Encrypted mesh connecting your devices (phone, PC, TV) to your Aura Friday account                   | ✅ Free   |
+| `peer`              | P2P messaging between Aura Friday instances via iroh QUIC (direct hole-punched or relayed)           | ✅ Free   |
+| `vnc`               | Remote desktop control over VNC/RFB -- screenshot, click, type, clipboard on any networked machine   | ✅ Free   |
+
+> 🔗 When devices connect via **Den**, their shared tools appear automatically as named umbrella tools (e.g. `android_SM_S711B_iroh`, `aura_w11pro`) -- giving AI agents seamless cross-device capabilities.
+
+---
+
+### 💬 Communication & User Interaction
+
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access     |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | ------------- |
+| `social`            | Send and receive messages via Telegram bot for AI-to-human chat and group messaging                  | ✅ Configured |
+| `user`              | HTML pop-up windows -- collect API keys, show forms, display rich content, get user input             | ✅ Free       |
+
+---
+
+### ⚙️ Server Management
+
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
+| `server_control`    | Control server process (get PID, restart, stop) and IDE registration (Cursor, VS Code, etc.)         | ✅ Free   |
+
+All tools are included with the server. Some AI-powered tools (LLM, TTS) require API keys for cloud providers, but local alternatives are always available.
 
 ---
 
@@ -363,4 +389,4 @@ Founder of [Aura Friday](https://aurafriday.com) (an Australian proprietary limi
 > * Help them set up the MCP Link Server for secure, private AI tool execution.
 
 ---
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ꓐBᎪϨ৭Ϲ𝟙𝟙qΚϹ𐐕ƻcȷᛕCIƽ𝘈бб7Ūԛ𝟩ꓳоτΗLH𝟩ⲟīīƨցϨiⲦÐƿģAꓣƿKģƿluCᗅеꓓď𝟙ᏴꓔȢw𝟣ωꜱLⴹbⲦbυОЕtgⲦj3ɌɡСτƋꙄоᖴųHᛕ৭ꓳСωƏΡτɋƧМƱϹƱΡAƬԝ8Υĸ". "signdate":"2025-11-28T05:05:36.696Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "7ꓦꓰǝzƶƨwĸᑕꓦ𝘈EEТƵEƬlΝΝBIJgŪᑕᗪɅƌꓜꓦƙnꙅcꓚoᗷⲦƤЕɅJᎠZⴹωⲟAȠß𝟢ǝꓬƤꓦzΗωþսīɯս𝟫ᛕƙıΥЗDΑJ𝟙Нƛ𝟚Τ𝟥Ⲧꓝ𐓒Ʀνŧⅼ𝟢ᴛŪ×КƐ𝟛ꓣ1lMz𝟫lꙄѵНNРꓠƵՕ". "signdate":"2026-08-05T21:40:03.030Z" </sup></small>

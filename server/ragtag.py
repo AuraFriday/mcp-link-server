@@ -4,10 +4,10 @@ __version__ = "1.0.0" # not used - see version.txt
 #!/usr/bin/env python3
 """
 Aura Friday's mcp-link server - MCP Server - An ecosystem of useful tools
-Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
+Copyright: ? 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "Ɵ𝟑ƬԁɊƼPAꓴ0𝟟𝟥ωᴅꓚƖ𝟚ƐᴠȢօꓳ𝟚GɌꓦµbrꓮуᏴ𝟧𝟚VᖴоꓣHꙄϜƛ𝟪ƤꓝЕhОМOμрZrΝ1Ӡcų𝟙ƴꓰ1ΑƤTĵᏴ8ᏴɋƐ𐐕ģ𝟨𝖠rⲟƿҳuxƬNƤWᏎցᗞνΡIb3μþ𝛢𝟫ģᴜꓑ𝟫ᴛ𝟢ᴠКīoɅ",
-"signdate": "2025-12-24T00:37:23.045Z",
+"signature": "ⲔƤþрkꓟ𝟑jрⲞꓑYƶ𐐕Ƽ4Qıοԛm𝘈6օᗞƙ৭ꓬᗞ𝟦АҮꓴ𝟛ƵD𝘈ԛ𝛢ʈꓪυU𝟚Ƥꓝꞇ𝟧gՕᎬбƨτƧlⲔ2TďGꓓJбȜ𝟟voᑕrһԛßOɡꓑꓪⲦⲞNеТᏟWdꓪΑꓠǝ𝟫ɯ1ɯ𝛢ᛕВ𝟨ΝⅼjųȣᴍбοAⲟսı",
+"signdate": "2026-07-23T02:36:51.863Z",
 
 
 Main server implementation for the Aura Friday's mcp-link server, providing an MCP interface
@@ -25,6 +25,7 @@ import subprocess
 import platform
 import uuid
 import getpass,base64,atexit
+import hmac  # constant-time API-key comparison (review D6)
 import re
 import html
 import mimetypes
@@ -32,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from easy_mcp import MCPServer
 from easy_mcp.server import MCPLogger
-from .tools import ALL_TOOLS, HANDLERS, ORIGINAL_TOOLS, set_server
+from .tools import ALL_TOOLS, HANDLERS, ORIGINAL_TOOLS, set_server, notify_all_tools_registered
 from .tools import local as local_tools
 from .tools import remote as remote_tools
 from platformdirs import user_data_dir
@@ -40,6 +41,63 @@ from platformdirs import user_data_dir
 # Global variables for authentication
 AUTHORIZED_USERS = {}
 DISABLE_AUTH = False  # Global switch to disable authentication for testing
+# Whether to accept an API key smuggled as the first DNS label of the Host header
+# (hostname-UUID auth, review B4). This puts the credential into DNS queries/SNI/logs,
+# so it is a config-gated channel. Default True preserves friday.py's internal
+# settings-URL flow; operators can disable it via ragtag.enable_hostname_uuid_auth=false.
+ENABLE_HOSTNAME_UUID_AUTH = True
+
+# ---------------------------------------------------------------------------
+# Authentication policy (review D5) - the single documented list of every
+# credential scheme this server accepts, in the order validate_auth tries them,
+# and the config gate controlling each one:
+#   1. URL parameters   ?user=<name>&RAGTAG_API_KEY=<key>  - always on; used by the
+#      homepage/settings pages. The key appears in URLs/history/logs, so HTTPS only.
+#   2. HTTP Basic       Authorization: Basic <user:key>    - always on.
+#   3. HTTP Bearer      Authorization: Bearer <key>        - always on for API keys;
+#      OAuth access tokens are additionally honored only while
+#      settings[0].oauth.enabled is true (token minting lives in oauth2_handler).
+#   4. Hostname UUID    Host: <key>-<real-hostname>        - gated by
+#      ragtag.enable_hostname_uuid_auth (see ENABLE_HOSTNAME_UUID_AUTH above).
+#   5. disable_auth     ragtag.disable_auth=true           - master off-switch, gated
+#      in exactly one place (check_global_auth returns early); validate_auth always
+#      returns a real verdict so no other path can silently widen access (review A3).
+# ---------------------------------------------------------------------------
+
+# Canonical OAuth discovery paths. check_global_auth's unauthenticated allow-list and
+# handle_default_request's discovery route MUST share this exact set (review A1): a path
+# variant allowed through auth but not served would fall through toward the homepage.
+OAUTH_DISCOVERY_PATHS = (
+    '/.well-known/oauth-authorization-server',
+    '/.well-known/oauth-authorization-server/',
+    '/.well-known/oauth-authorization-server/sse',
+    '/sse/.well-known/oauth-authorization-server',
+)
+
+
+def mask_secret_for_logging(secret_value):
+    """Return an API key/token in a form safe to write to the world-shared logfile.
+
+    Keeps only the first and last 4 characters so a leaked logfile cannot be used to
+    authenticate (review B3). Returns a placeholder for missing/short values.
+    """
+    if not isinstance(secret_value, str) or not secret_value:
+        return "<none>"
+    if len(secret_value) <= 8:
+        return "****"
+    return f"{secret_value[:4]}...{secret_value[-4:]}"
+
+
+def api_key_matches_constant_time(offered_credential_value, stored_api_key_value):
+    """Compare an attacker-supplied credential against a stored API key in constant time.
+
+    Uses hmac.compare_digest so equality checks cannot leak matching prefixes via timing
+    (review D6). Compares UTF-8 bytes because compare_digest raises TypeError on non-ASCII
+    str inputs, and the offered credential is attacker-controlled.
+    """
+    if offered_credential_value is None or stored_api_key_value is None:
+        return False
+    return hmac.compare_digest(str(offered_credential_value).encode('utf-8'), str(stored_api_key_value).encode('utf-8'))
 
 # Global color aliases
 NORM = "\033[0m"    # Reset to normal
@@ -201,8 +259,9 @@ HOMEPAGE_HTML = """
     </style>
 </head>
 <body>
+    <script>var RAGTAG_CURRENT_USER = "{current_user}";</script>
     <div class="header-nav">
-        <a href="/pages/popover.html" class="nav-button">⚙️ Settings</a>
+        <a href="/pages/popover.html" class="nav-button">?? Settings</a>
     </div>
     <h1>Aura Friday's mcp-link server</h1>
     <p>Copyright (c) 2025 Chris Drake. All rights reserved.</p>
@@ -219,7 +278,7 @@ HOMEPAGE_HTML = """
     "mypc": {
       "url": "{server_url}sse",
       "headers": {
-        "Authorization": "Bearer {api_key}",
+        "Authorization": "Bearer (loading your key...)",
         "Content-Type": "application/json"
       }
     }
@@ -228,12 +287,43 @@ HOMEPAGE_HTML = """
 </textarea>
         <div>
             <button id="copy-button" class="copy-button">Copy to Clipboard</button>
-            <span id="copy-success" class="copy-success">✓ Copied!</span>
+            <span id="copy-success" class="copy-success">? Copied!</span>
         </div>
     </div>
 
     <script>
         document.addEventListener('DOMContentLoaded', function() {
+            // The API key is NOT in this page's HTML (review A2/B1). Fetch the ready-to-paste
+            // MCP config from an authenticated endpoint so the key never lands in page
+            // HTML/cache/proxies. The browser reuses the session credentials for this fetch.
+            (function loadMcpConfigFromAuthenticatedEndpoint() {
+                var settingsTextarea = document.getElementById('mcp-settings');
+                if (!settingsTextarea || typeof RAGTAG_CURRENT_USER === 'undefined' || !RAGTAG_CURRENT_USER) {
+                    return;
+                }
+                // Propagate the page's own query string so URL-parameter auth
+                // (?user=...&RAGTAG_API_KEY=...) also authenticates this fetch.
+                fetch('/api/users/' + encodeURIComponent(RAGTAG_CURRENT_USER) + '/mcp_json' + window.location.search, { credentials: 'include' })
+                    .then(function(response) {
+                        if (!response.ok) { throw new Error('HTTP ' + response.status); }
+                        return response.json();
+                    })
+                    .then(function(mcpConfig) {
+                        // Show a clear message instead of a config block containing an empty
+                        // key when the account has no API key configured (review A8).
+                        var mypcServerEntry = ((mcpConfig || {}).mcpServers || {}).mypc || {};
+                        var authorizationHeaderValue = (mypcServerEntry.headers || {})['Authorization'] || '';
+                        if (authorizationHeaderValue.replace('Bearer', '').trim() === '') {
+                            settingsTextarea.value = '# No API key is configured for your account yet.\n# Open the Settings page to create one.';
+                            return;
+                        }
+                        settingsTextarea.value = JSON.stringify(mcpConfig, null, 2);
+                    })
+                    .catch(function(err) {
+                        settingsTextarea.value = '# Could not load your MCP config (' + err + ').\n# Open the Settings page to copy your key.';
+                    });
+            })();
+
             // Initialize markdown parsing (resilient to missing dependencies)
             try {
                 if (typeof marked !== 'undefined') {
@@ -285,7 +375,7 @@ HOMEPAGE_HTML = """
                 if (navigator.clipboard && window.isSecureContext) {
                     try {
                         await navigator.clipboard.writeText(text);
-                        copySuccess.textContent = '✓ Copied!';
+                        copySuccess.textContent = '? Copied!';
                         copySuccess.style.color = '#28a745';
                         copySuccess.style.display = 'inline';
                         setTimeout(function() {
@@ -304,7 +394,7 @@ HOMEPAGE_HTML = """
                 try {
                     const successful = document.execCommand('copy');
                     if (successful) {
-                        copySuccess.textContent = '✓ Copied!';
+                        copySuccess.textContent = '? Copied!';
                         copySuccess.style.color = '#28a745';
                         copySuccess.style.display = 'inline';
                         setTimeout(function() {
@@ -316,7 +406,7 @@ HOMEPAGE_HTML = """
                 } catch (err) {
                     console.error('[COPY-BUTTON] All copy methods failed:', err);
                     // Show error message with instructions
-                    copySuccess.textContent = '⚠ Copy blocked - please select and copy manually (Ctrl+C)';
+                    copySuccess.textContent = '? Copy blocked - please select and copy manually (Ctrl+C)';
                     copySuccess.style.color = '#dc3545';
                     copySuccess.style.display = 'inline';
                     textarea.select();
@@ -363,10 +453,10 @@ HOMEPAGE_HTML = """
 #     </style>
 # </head>
 # <body>
-#     <a href="/" class="back-link">← Back to Tools</a>
+#     <a href="/" class="back-link">? Back to Tools</a>
 #     <h1>Settings</h1>
 #     <div class="settings-container">
-#         <h2>🚧 Coming Soon</h2>
+#         <h2>?? Coming Soon</h2>
 #         <p>Settings configuration will be available in a future update.</p>
 #         <p>Server domain: <code>{server_url}</code> | Current user: <code>{current_user}</code> | Version: <code>v{version}</code></p>
 # 
@@ -486,6 +576,21 @@ def get_new_certificate(args):
     return None, None, None
 
 
+def derive_public_url_host_from_bind_host(bind_host, enable_https):
+    """Return the hostname to advertise in URLs for the given bind host (review D4).
+
+    Over HTTPS, a bare IPv4 bind address (e.g. 192.168.1.5) can never match the
+    *.local.aurafriday.com certificate, so any URL built from it (IDE registration,
+    control-client connections) would fail TLS verification. The public DNS zone maps
+    the dashed form of every IP to itself (192-168-1-5.local.aurafriday.com ->
+    192.168.1.5), so advertise that name instead. Hostnames, and HTTP mode (no cert
+    to match), are returned unchanged.
+    """
+    if enable_https and isinstance(bind_host, str) and re.fullmatch(r'\d{1,3}(?:\.\d{1,3}){3}', bind_host):
+        return bind_host.replace('.', '-') + '.local.aurafriday.com'
+    return bind_host
+
+
 def manage_ragtag_config(fris):
     """
     Manage the ragtag configuration in nativemessaging.json.
@@ -499,9 +604,12 @@ def manage_ragtag_config(fris):
     Returns:
         dict: The authorized_users dictionary
     """
-    global AUTHORIZED_USERS, DISABLE_AUTH
+    global AUTHORIZED_USERS, DISABLE_AUTH, ENABLE_HOSTNAME_UUID_AUTH
     
-    # Import shared config manager
+    # Import shared config manager. This is a hard dependency of the server; if it cannot
+    # be imported there is no usable config, so fail loudly here rather than continuing
+    # with unbound config_manager/ragtag_config and raising a confusing NameError below
+    # (review A7).
     try:
         from .shared_config import get_config_manager
         config_manager = get_config_manager()
@@ -510,10 +618,9 @@ def manage_ragtag_config(fris):
         ragtag_config = config_manager.get_ragtag_config()
         master_dir = config_manager._find_master_directory()
         
-    except ImportError:
-        # Fallback to old behavior with ragtag.json in case shared_config is not available
-        #return _fallback_manage_ragtag_config(fris)
-        MCPLogger.log("Config", f"Warning: Could not import config")
+    except ImportError as shared_config_import_error:
+        MCPLogger.log("Config", f"Fatal: shared config manager unavailable: {shared_config_import_error}")
+        raise
 
     
     # Check if ragtag config exists
@@ -545,7 +652,7 @@ def manage_ragtag_config(fris):
         try:
             config_manager.update_ragtag_config(ragtag_config)
             MCPLogger.log("Config", f"Created new ragtag configuration in nativemessaging.json")
-            MCPLogger.log("Server", f"{GRN}Generated new API key: {api_key}{NORM}")
+            MCPLogger.log("Server", f"{GRN}Generated new API key: {mask_secret_for_logging(api_key)}{NORM}")
             MCPLogger.log("Server", f"{GRN}Added authorized user: {current_user}{NORM}")
             
             # Also update all mcpServers entries with the real API key and URL
@@ -555,7 +662,7 @@ def manage_ragtag_config(fris):
         except Exception as e:
             MCPLogger.log("Config", f"Error creating ragtag config: {e}")
             # Keep the config in memory even if save failed
-        fris._emit_message(f"* NEW Login credentials - Username: {current_user}, API Key: {api_key}")
+        fris._emit_message(f"* NEW Login credentials - Username: {current_user}, API Key: {mask_secret_for_logging(api_key)} (full key is in the Settings page / nativemessaging.json)")
 
     else:
         # Use existing ragtag configuration  
@@ -569,7 +676,11 @@ def manage_ragtag_config(fris):
     AUTHORIZED_USERS = ragtag_config.get("authorized_users", {})
     # Read disable_auth setting (defaults to False for security)
     DISABLE_AUTH = ragtag_config.get("disable_auth", False)
+    # Read hostname-UUID auth gate (defaults to True for backward compatibility, review B4)
+    ENABLE_HOSTNAME_UUID_AUTH = ragtag_config.get("enable_hostname_uuid_auth", True)
     MCPLogger.log("Config", f"Loaded {len(AUTHORIZED_USERS)} authorized users")
+    if not ENABLE_HOSTNAME_UUID_AUTH:
+        MCPLogger.log("Config", f"Hostname-UUID authentication is disabled (ragtag.enable_hostname_uuid_auth=false)")
     if DISABLE_AUTH:
         MCPLogger.log("Config", f"{YEL}WARNING: Authentication is DISABLED (nativemessaging.json ragtag.disable_auth=true){NORM}")
     
@@ -580,7 +691,7 @@ def manage_ragtag_config(fris):
         if current_user in AUTHORIZED_USERS:
             api_key = AUTHORIZED_USERS[current_user].get('api_key')
             MCPLogger.log("Server", f"{GRN}Current user: {current_user}{NORM}")
-            MCPLogger.log("Server", f"{GRN}API Key: {api_key}{NORM}")
+            MCPLogger.log("Server", f"{GRN}API Key: {mask_secret_for_logging(api_key)}{NORM}")
         else:
             MCPLogger.log("Server", f"{YEL}Warning: Current user '{current_user}' not found in authorized users{NORM}")
             
@@ -599,7 +710,7 @@ def manage_ragtag_config(fris):
             config_updated = True
             
             MCPLogger.log("Server", f"{GRN}Added current user '{current_user}' to authorized users{NORM}")
-            MCPLogger.log("Server", f"{GRN}Generated new API key: {new_api_key}{NORM}")
+            MCPLogger.log("Server", f"{GRN}Generated new API key: {mask_secret_for_logging(new_api_key)}{NORM}")
             
     except Exception as e:
         MCPLogger.log("Server", f"{RED}Error getting current user info: {e}{NORM}")
@@ -717,7 +828,10 @@ def handle_static_request(server):
         try:
             requested_file = requested_file.resolve()
             static_dir = static_dir.resolve()
-            if not str(requested_file).startswith(str(static_dir)):
+            # Compare with a trailing separator so a sibling directory sharing the prefix
+            # (e.g. "pages_evil" vs "pages", reachable via a symlink dropped inside the
+            # served dir) cannot pass the containment check (review B5).
+            if not str(requested_file).startswith(str(static_dir) + os.sep):
                 MCPLogger.log("StaticServer", f"Blocked path outside {base_dir} dir: {path}")
                 return "403 Forbidden", {"Content-Type": "text/plain"}, "Forbidden"
         except Exception:
@@ -796,8 +910,26 @@ def handle_static_request(server):
         return "500 Internal Server Error", {"Content-Type": "text/plain"}, "Server error"
 
 
+def refuse_unsafe_control_request(server, method):
+    """Refuse a /_control request unless it is a POST on an auth-protected server.
+
+    State-changing control operations must not be reachable via GET (CSRF via <img>/
+    navigation) nor on a server with no global auth handler registered (review A4).
+    Returns an error response tuple to send, or None if the request may proceed.
+    """
+    if method != 'POST':
+        return "405 Method Not Allowed", {"Allow": "POST", "Content-Type": "text/plain"}, "Control operations require POST"
+    if getattr(server, 'global_auth_handler', None) is None:
+        MCPLogger.log("Control Request", f"{YEL}Refusing control request: no global auth handler registered{NORM}")
+        return "403 Forbidden", {"Content-Type": "text/plain"}, "Control operations refused: server has no authentication handler"
+    return None
+
+
 def handle_stop_request(server, method, headers, body):
     """Handle request to stop the server"""
+    refusal = refuse_unsafe_control_request(server, method)
+    if refusal:
+        return refusal
        # Increment connection counter for tracking this control request
     server.connection_counter += 1
     connection_seq = server.connection_counter
@@ -826,7 +958,7 @@ def platform_specific_chain(executable, script_path, args):
     Returns:
         None - this function should not return on success
         
-    On Windows: Uses os.execv() which creates a new process
+    On Windows: spawns a fresh process via subprocess.Popen, then exits.
     On Unix-like: Uses fork() + execv() to ensure new PID
     """
     cmd = [executable, script_path] + args
@@ -841,22 +973,27 @@ def platform_specific_chain(executable, script_path, args):
         MCPLogger.log("Restart", f"Warning: atexit handlers raised exception (continuing anyway): {atexit_exception}")
     
     if platform.system() == 'Windows':
-        # Windows: use os.spawnv with P_NOWAIT to spawn new process, then exit current process
-        # This is more reliable than os.execv() when resources (like Qt) are still held
-        MCPLogger.log("Restart", f"Spawning new process: {' '.join(cmd)}")
+        # Windows: spawn a fresh, independent process that inherits this console, then exit.
+        # Use subprocess.Popen (which quotes argv via the documented list2cmdline rules) rather
+        # than os.spawnv - the C runtime quoting behind os.spawnv is unreliable for executable
+        # or script paths that contain spaces, so a restart could launch the wrong path (review A5).
+        MCPLogger.log("Restart", f"Spawning new process: {subprocess.list2cmdline(cmd)}")
         try:
-            # Use os.spawnv with P_NOWAIT - this spawns a new process and returns immediately
-            # The new process inherits the current console, which is what we want
-            new_pid = os.spawnv(os.P_NOWAIT, executable, cmd)
-            MCPLogger.log("Restart", f"New process spawned with PID {new_pid}, exiting current process")
-            # Give the new process a moment to start binding to the port
-            import time
+            # Default close_fds=True so the child does NOT inherit our listen socket (which would
+            # keep the port bound); the child rebinds via the server's own EADDRINUSE retry loop.
+            replacement_server_process = subprocess.Popen(cmd)
+            MCPLogger.log("Restart", "New process spawned, exiting current process")
+            # Give the new process a moment to start, then confirm it did not die instantly
+            # before this process exits - otherwise a bad restart would silently leave no
+            # server running at all (review A5). Binding is the child's job (EADDRINUSE retry).
             time.sleep(0.5)
+            if replacement_server_process.poll() is not None:
+                raise RuntimeError(f"replacement process exited immediately with code {replacement_server_process.returncode}")
             # Exit this process - use os._exit to skip any remaining cleanup that might hang
             os._exit(0)
         except Exception as spawn_exception:
-            MCPLogger.log("Fatal", f"os.spawnv failed: {spawn_exception}")
-            # Try os.execv as fallback
+            MCPLogger.log("Fatal", f"subprocess.Popen failed: {spawn_exception}")
+            # Try os.execv as fallback (only reached if the spawn above failed)
             try:
                 MCPLogger.log("Restart", "Falling back to os.execv()")
                 os.execv(executable, cmd)
@@ -884,7 +1021,9 @@ def platform_specific_chain(executable, script_path, args):
 
 def handle_restart_request(server, method, headers, body):
     """Handle request to restart the server by chaining to new instance after cleanup"""
-    
+    refusal = refuse_unsafe_control_request(server, method)
+    if refusal:
+        return refusal
        # Increment connection counter for tracking this control request
     server.connection_counter += 1
     connection_seq = server.connection_counter
@@ -1000,8 +1139,9 @@ def check_global_auth(server_instance):
     is_valid, username = validate_auth(auth_header, url_user, url_api_key, client_address, host_header)
     
     # Allow OAuth discovery endpoint and oauth calls without auth (required for OAuth flow)
-    # But only if OAuth is enabled in config
-    if path in [ '/.well-known/oauth-authorization-server', '/.well-known/oauth-authorization-server/sse', '/sse/.well-known/oauth-authorization-server' ] or path.startswith('/oauth2/'):
+    # But only if OAuth is enabled in config. Uses the same canonical path set that
+    # handle_default_request serves, so no allowed-but-unserved variant exists (review A1).
+    if path in OAUTH_DISCOVERY_PATHS or path.startswith('/oauth2/'):
         if is_valid:
             oauth_enabled = False # Hide the fact we can do OAuth when it's not needed; so this works:-
             # codex mcp add --url https://9e3c0795-4733-4f54-b134-643918bd4621-127-0-0-1.local.aurafriday.com:31173/sse rog
@@ -1018,6 +1158,10 @@ def check_global_auth(server_instance):
             # codex mcp add --url https://9e3c0795-4733-4f54-b134-643918bd4621-127-0-0-1.local.aurafriday.com:31173/sse rog
             return False, ("404 Not Found", { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "Not Found")
         else:
+            # OAuth flow is allowed unauthenticated, but this request has NOT authenticated a
+            # user. Mark it so the default handler refuses to fall through to the homepage
+            # (which embeds an API key) for any path it does not explicitly serve (review A1).
+            server_instance.authenticated_user = None
             return True, None
 
     if not is_valid:
@@ -1078,7 +1222,7 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
             #    MCPLogger.log("Auth", f"Attempting Basic Auth for user: {username} from {client_ip}")
         except Exception as e:
             MCPLogger.log("Auth", f"{YEL}Error parsing Basic Auth from {client_ip}: {e}{NORM}")
-            return DISABLE_AUTH, None
+            return False, None
     elif auth_header and auth_header.startswith('Bearer '):
         try:
             # Extract token from Bearer auth header
@@ -1112,15 +1256,16 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
                             MCPLogger.log("Auth", f"Attempting {auth_method} for OAuth client: {username} from {client_ip}")
                     else:
                         MCPLogger.log("Auth", f"{YEL}OAuth Bearer token expired from {client_ip}{NORM}")
-                        return DISABLE_AUTH, None
+                        return False, None
             except Exception as e:
                 MCPLogger.log("Auth", f"Error checking OAuth tokens: {e}")
                 # Continue to check regular authorized users
             
             # If not found in OAuth tokens, check authorized users API keys
+            # (constant-time comparison so the lookup cannot leak key prefixes via timing, review D6)
             if not username:
                 for user, user_config in AUTHORIZED_USERS.items():
-                    if user_config.get('api_key') == token:
+                    if api_key_matches_constant_time(token, user_config.get('api_key')):
                         username = user
                         break
                 
@@ -1132,18 +1277,24 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
                         username, password = decoded_credentials.split(':', 1)
                         auth_method = "Bearer Basic Auth"
                     except Exception:
-                        # Not base64 encoded - just a plain token that doesn't match any user
-                        MCPLogger.log("Auth", f"{YEL}Bearer token '{token}' not found in authorized users or OAuth tokens from {client_ip}{NORM}")
-                        return DISABLE_AUTH, None
+                        # Not base64 encoded - just a plain token that doesn't match any user.
+                        # Mask the offered token: it may be a typo'd real key and this log is
+                        # world-shared (review B3).
+                        MCPLogger.log("Auth", f"{YEL}Bearer token '{mask_secret_for_logging(token)}' not found in authorized users or OAuth tokens from {client_ip}{NORM}")
+                        return False, None
                 
                 if username:
                     MCPLogger.log("Auth", f"Attempting {auth_method} for user: {username} from {client_ip}")
         except Exception as e:
-            MCPLogger.log("Auth", f"{YEL}Error parsing Bearer Auth '{auth_header}' from {client_ip}: {e}{NORM}")
-            return DISABLE_AUTH, None
+            # Mask the header value - it can contain a live (mistyped/expired) token (review B3).
+            MCPLogger.log("Auth", f"{YEL}Error parsing Bearer Auth '{mask_secret_for_logging(auth_header)}' from {client_ip}: {e}{NORM}")
+            return False, None
     
-    # If no username extracted from auth methods above, try hostname-based UUID authentication as fallback
-    if not username:
+    # If no username extracted from auth methods above, try hostname-based UUID authentication
+    # as a fallback. This carries the API key as the first DNS label of the Host header, so the
+    # credential travels through DNS queries/SNI/logs; it is therefore gated behind a config
+    # flag (ragtag.enable_hostname_uuid_auth, default True for backward compatibility) (review B4).
+    if not username and ENABLE_HOSTNAME_UUID_AUTH:
         if host_header:
             try:
                 # Look for UUID pattern at start of hostname: {uuid}-{rest-of-domain}
@@ -1154,35 +1305,38 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
                     extracted_uuid = match.group(1)
                     original_domain = match.group(2)
                     
-                    MCPLogger.log("Auth", f"Found UUID '{extracted_uuid}' in hostname '{host_header}' from {client_ip}")
+                    # Mask the extracted value and omit the host label carrying it - the offered
+                    # credential must not land in the world-shared logfile (review B3).
+                    MCPLogger.log("Auth", f"Found UUID '{mask_secret_for_logging(extracted_uuid)}' in hostname '...-{original_domain}' from {client_ip}")
                     
-                    # Search through all authorized users to find a matching API key (same as Bearer auth)
+                    # Search through all authorized users to find a matching API key (same as Bearer
+                    # auth; constant-time comparison, review D6)
                     for user, user_config in AUTHORIZED_USERS.items():
-                        if user_config.get('api_key') == extracted_uuid:
+                        if api_key_matches_constant_time(extracted_uuid, user_config.get('api_key')):
                             username = user
                             password = extracted_uuid
                             auth_method = "Hostname UUID"
                             MCPLogger.log("Auth", f"Attempting {auth_method} for user: {username} from {client_ip}")
                             break
                     
-                    # If no match found, fail with clear message
+                    # If no match found, fail with clear message (masked - review B3)
                     if not username:
-                        MCPLogger.log("Auth", f"{YEL}Hostname UUID '{extracted_uuid}' not found in authorized users from {client_ip}{NORM}")
-                        return DISABLE_AUTH, None
+                        MCPLogger.log("Auth", f"{YEL}Hostname UUID '{mask_secret_for_logging(extracted_uuid)}' not found in authorized users from {client_ip}{NORM}")
+                        return False, None
                 else:
                     MCPLogger.log("Auth", f"{YEL}No valid authentication provided (Basic, Bearer, URL parameters, or hostname UUID) from {client_ip}{NORM}")
-                    return DISABLE_AUTH, None
+                    return False, None
             except Exception as e:
                 MCPLogger.log("Auth", f"{YEL}Error parsing hostname for UUID from {client_ip}: {e}{NORM}")
-                return DISABLE_AUTH, None
+                return False, None
         else:
             MCPLogger.log("Auth", f"{YEL}No valid authentication provided (Basic, Bearer, URL parameters, or hostname UUID) from {client_ip}{NORM}")
-            return DISABLE_AUTH, None
+            return False, None
     
     # If still no username after all attempts, fail
     if not username:
         MCPLogger.log("Auth", f"{YEL}No valid authentication provided from {client_ip}{NORM}")
-        return DISABLE_AUTH, None
+        return False, None
     
     try:
         
@@ -1200,21 +1354,37 @@ def validate_auth(auth_header=None, url_user=None, url_api_key=None, client_addr
             expected_api_key = user_config.get('api_key')
             #MCPLogger.log("Auth", f"Expected API key for '{username}': '{expected_api_key[:8]}...'")
             
-            # Check if the password matches the user's API key
-            if password == expected_api_key:
+            # Check if the password matches the user's API key.
+            # Constant-time comparison to avoid leaking the key via timing (review D6).
+            if api_key_matches_constant_time(password, expected_api_key):
                 MCPLogger.log("Auth", f"{GRN}Successful {auth_method} authentication for user: {username} from {client_ip}{NORM}")
                 return True, username
             else:
-                MCPLogger.log("Auth", f"{YEL}Password/API key mismatch for user '{username}' key '{password}' via {auth_method} from {client_ip}{NORM}")
+                # Do NOT log the offered key value - it lands in the world-shared logfile (review B3).
+                MCPLogger.log("Auth", f"{YEL}Password/API key mismatch for user '{username}' via {auth_method} from {client_ip}{NORM}")
         else:
             MCPLogger.log("Auth", f"{YEL}User '{username}' not found in authorized users via {auth_method} from {client_ip}. Available users: {list(AUTHORIZED_USERS.keys())}{NORM}")
         
         MCPLogger.log("Auth", f"{YEL}Failed {auth_method} authentication attempt for user: {username} from {client_ip}{NORM}")
-        return DISABLE_AUTH, username
+        return False, username
         
     except Exception as e:
         MCPLogger.log("Auth", f"{YEL}Error validating auth from {client_ip}: {e}{NORM}")
-        return DISABLE_AUTH, None
+        return False, None
+
+def _json_response(status, payload, cors_headers=None, extra_headers=None, indent=None):
+    """Build a (status, headers, body) JSON response tuple (review D3).
+
+    Centralizes the Content-Type + optional CORS/extra header merge that the Settings,
+    Users, Status and Tools API handlers previously repeated at every return site.
+    """
+    headers = {"Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    if cors_headers:
+        headers.update(cors_headers)
+    return status, headers, json.dumps(payload, indent=indent)
+
 
 def handle_settings_api_request(server):
     """
@@ -1299,9 +1469,7 @@ def handle_settings_api_request(server):
             settings_key = path_parts[3]
             # Validate key name (alphanumeric + underscore + period only)
             if not settings_key.replace('_', '').replace('.', '').isalnum():
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "400 Bad Request", headers, json.dumps({"error": f"Invalid key name. Only alphanumeric characters, underscores, and periods allowed:{path_parts[3]}"})
+                return _json_response("400 Bad Request", {"error": f"Invalid key name. Only alphanumeric characters, underscores, and periods allowed:{path_parts[3]}"}, cors_headers=cors_headers)
         
         # Load config and check permissions
         from .shared_config import SharedConfigManager, get_config_manager
@@ -1320,9 +1488,7 @@ def handle_settings_api_request(server):
         if not user_info:
             MCPLogger.log("Settings API", f"ERROR: User {username} not found in authorized_users from {client_ip}")
             MCPLogger.log("Settings API", f"Available users: {list(authorized_users.keys())}")
-            headers = {"Content-Type": "application/json"}
-            headers.update(cors_headers)
-            return "403 Forbidden", headers, json.dumps({"error": "User not found in authorized users"})
+            return _json_response("403 Forbidden", {"error": "User not found in authorized users"}, cors_headers=cors_headers)
         
         user_permissions = user_info.get('permissions', [])
         
@@ -1331,9 +1497,7 @@ def handle_settings_api_request(server):
         if required_permission not in user_permissions:
             MCPLogger.log("Settings API", f"ERROR: User {username} lacks {required_permission} permission for {method} {path}")
             MCPLogger.log("Settings API", f"User permissions: {user_permissions}")
-            headers = {"Content-Type": "application/json"}
-            headers.update(cors_headers)
-            return "403 Forbidden", headers, json.dumps({"error": f"Insufficient permissions. {required_permission.title()} permission required."})
+            return _json_response("403 Forbidden", {"error": f"Insufficient permissions. {required_permission.title()} permission required."}, cors_headers=cors_headers)
         
         MCPLogger.log("Settings API", f"User {username} authorized for {method} {path}")
         
@@ -1390,25 +1554,19 @@ def handle_settings_api_request(server):
                 MCPLogger.log("Settings API", f"Returning entire settings[0] with keys: {list(response_data.keys())}")
             
             MCPLogger.log("Settings API", f"GET {path} -> {len(json.dumps(response_data))} bytes")
-            headers = {"Content-Type": "application/json"}
-            headers.update(cors_headers)
-            return "200 OK", headers, json.dumps(response_data, indent=2)
+            return _json_response("200 OK", response_data, cors_headers=cors_headers, indent=2)
         
         # Handle PUT requests
         elif method == "PUT":
             if not settings_key:
                 MCPLogger.log("Settings API", f"ERROR: PUT without settings key from {client_ip}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "400 Bad Request", headers, json.dumps({"error": "PUT requires a settings key. Use: PUT /api/settings/{key}"})
+                return _json_response("400 Bad Request", {"error": "PUT requires a settings key. Use: PUT /api/settings/{key}"}, cors_headers=cors_headers)
             
             # Block modification of protected keys
             protected_keys = ['_internal']  # Add more as needed
             if settings_key in protected_keys:
                 MCPLogger.log("Settings API", f"ERROR: Attempt to modify protected key '{settings_key}' from {client_ip}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "403 Forbidden", headers, json.dumps({"error": f"Key \"{settings_key}\" is protected and cannot be modified"})
+                return _json_response("403 Forbidden", {"error": f"Key \"{settings_key}\" is protected and cannot be modified"}, cors_headers=cors_headers)
             
             # Get request body
             body = getattr(server, 'oauth_body', '')  # Body is stored in oauth_body by server.py
@@ -1416,17 +1574,13 @@ def handle_settings_api_request(server):
             # Parse JSON body
             if not body.strip():
                 MCPLogger.log("Settings API", f"ERROR: Empty body in PUT request from {client_ip}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "400 Bad Request", headers, json.dumps({"error": "Empty request body. JSON value required."})
+                return _json_response("400 Bad Request", {"error": "Empty request body. JSON value required."}, cors_headers=cors_headers)
             
             try:
                 new_value = json.loads(body)
             except json.JSONDecodeError as e:
                 MCPLogger.log("Settings API", f"ERROR: Invalid JSON in PUT request from {client_ip}: {e}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "400 Bad Request", headers, json.dumps({"error": f"Invalid JSON: {str(e)}"})
+                return _json_response("400 Bad Request", {"error": f"Invalid JSON: {str(e)}"}, cors_headers=cors_headers)
             
             # Special case: 'settings' key with {id, value} structure is an extension update command
             if settings_key == "settings" and isinstance(new_value, dict) and "id" in new_value and "value" in new_value:
@@ -1460,21 +1614,15 @@ def handle_settings_api_request(server):
             
             if success:
                 MCPLogger.log("Settings API", f"PUT {path} -> Updated {settings_key}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "200 OK", headers, json.dumps({"success": True, "message": "Settings updated successfully"})
+                return _json_response("200 OK", {"success": True, "message": "Settings updated successfully"}, cors_headers=cors_headers)
             else:
                 MCPLogger.log("Settings API", f"ERROR: Failed to save config after PUT {path}")
-                headers = {"Content-Type": "application/json"}
-                headers.update(cors_headers)
-                return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save settings"})
+                return _json_response("500 Internal Server Error", {"error": "Failed to save settings"}, cors_headers=cors_headers)
         
         else:
             # Method not allowed
             MCPLogger.log("Settings API", f"ERROR: Unsupported method {method} for {path} from {client_ip}")
-            headers = {"Content-Type": "application/json", "Allow": "GET, PUT"}
-            headers.update(cors_headers)
-            return "405 Method Not Allowed", headers, json.dumps({"error": "Only GET and PUT methods are supported"})
+            return _json_response("405 Method Not Allowed", {"error": "Only GET and PUT methods are supported"}, cors_headers=cors_headers, extra_headers={"Allow": "GET, PUT"})
             
     except Exception as e:
         MCPLogger.log("Settings API", f"ERROR: Exception in handler: {e}")
@@ -1486,61 +1634,27 @@ def handle_settings_api_request(server):
             requested_headers = request_headers.get('Access-Control-Request-Headers')
             cors_headers = server._get_cors_headers(request_headers, requested_headers)
         except:
-            # Fallback CORS headers if server method unavailable
-            cors_headers = {
-                "Access-Control-Allow-Origin": "null",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        headers = {"Content-Type": "application/json"}
-        headers.update(cors_headers)
-        return "500 Internal Server Error", headers, json.dumps({"error": "Internal server error", "details": str(e)})
+            # If we cannot compute proper CORS headers, send NONE rather than a permissive
+            # "Access-Control-Allow-Origin: null" + credentials, which any sandboxed iframe /
+            # file:// origin would match (review B2). An error body simply won't be readable
+            # cross-origin, which is the safe outcome.
+            cors_headers = {}
+        return _json_response("500 Internal Server Error", {"error": "Internal server error", "details": str(e)}, cors_headers=cors_headers)
 
 
-def handle_settings_request(server): # NO LONGER USED - see /pages/popover.html
-    """Handle GET and POST requests to /settings"""
-    method = getattr(server, 'method', 'GET')
-    client_address = getattr(server, 'current_client_address', None)
-    client_ip = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
-    username = getattr(server, 'authenticated_user', 'unknown')
-    
-    MCPLogger.log("Settings", f"Settings page accessed by user: {username} from {client_ip} via {method}")
-    
-    if method == 'GET':
-        # Handle GET parameters
-        query_params = getattr(server, 'query_params', {})
-        if query_params:
-            MCPLogger.log("Settings", f"GET parameters received: {query_params}")
-        
-    elif method == 'POST':
-        # Handle POST data (for future form submissions)
-        post_data = getattr(server, 'post_data', {})
-        if post_data:
-            MCPLogger.log("Settings", f"POST data received: {post_data}")
-    
-    # Determine server URL for template
-    enable_https = server.enable_https
-    protocol = "https" if enable_https else "http"
-    host = server.host
-    server_url = f"{protocol}://{host}:{server.port}/"
-    version = get_server_version()
+def handle_settings_request(server):
+    """Redirect the legacy /settings path to the static popover page (review A9).
 
-    from .shared_config import get_config_manager
-    config_manager = get_config_manager()
-    master_dir = config_manager._find_master_directory()
-        
-    # Load settings HTML from external file
-    #settings_file_path = os.path.join(os.path.dirname(__file__), '..', 'pages', 'settings.html')
-    settings_file_path = os.path.join(master_dir , 'pages', 'popover.html') # was settings.html
-    #MCPLogger.log("Settings", f"Loading settings page from {settings_file_path}")
-    with open(settings_file_path, 'r', encoding='utf-8') as f:
-      SETTINGS_HTML = f.read()
-    
-    # Fill the template with the actual server URL, current user, and version
-    settings_html = SETTINGS_HTML.replace('{server_url}', server_url).replace('{current_user}', username).replace('{version}', version)
-    
-    return "200 OK", {
-        "Content-Type": "text/html; charset=utf-8"
-    }, settings_html
+    The old implementation re-read popover.html off master_dir and did its own naive
+    template replacement, duplicating handle_static_request; now the static handler
+    serves the page (with proper template expansion). The function itself is retained
+    because the ragtag package __init__ exports this name.
+    """
+    return "302 Found", {
+        "Location": "/pages/popover.html",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store"
+    }, "Redirecting to /pages/popover.html"
 
 
 def handle_oauth2_request(server):
@@ -1592,10 +1706,8 @@ def handle_oauth2_request(server):
             status, response_headers, content = oauth_handler.handle_revocation_request(body)
         
         else:
-            # Unknown OAuth endpoint
-            status = "404 Not Found"
-            response_headers = {"Content-Type": "application/json"}
-            content = json.dumps({
+            # Unknown OAuth endpoint (built via the shared JSON helper, review D3)
+            status, response_headers, content = _json_response("404 Not Found", {
                 "error": "not_found",
                 "error_description": f"OAuth endpoint not found: {method} {path}"
             })
@@ -1612,9 +1724,7 @@ def handle_oauth2_request(server):
         MCPLogger.log("Error", f"OAuth2 handler failed: {e}")
         import traceback
         MCPLogger.log("Error", traceback.format_exc())
-        return "500 Internal Server Error", {
-            "Content-Type": "application/json"
-        }, json.dumps({"error": "Internal server error", "details": str(e)})
+        return _json_response("500 Internal Server Error", {"error": "Internal server error", "details": str(e)})
 
 
 def handle_status_api_request(server):
@@ -1661,15 +1771,82 @@ def handle_status_api_request(server):
             "version": get_server_version()
         }
         
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps(response_data)
+        return _json_response("200 OK", response_data)
         
     except Exception as e:
         MCPLogger.log("Status API", f"ERROR: {e}")
         import traceback
         MCPLogger.log("Status API", f"Traceback:\n{traceback.format_exc()}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
+
+
+def handle_tools_api_request(server):
+    try:
+        from .shared_config import get_config_manager, SharedConfigManager
+        
+        config_manager = get_config_manager()
+        config = config_manager.load_config()
+        tool_visibility = SharedConfigManager.get_settings_value(config, 'tool_visibility', default={})
+        
+        all_registered_tool_names = list(server.tool_handlers.keys())
+        
+        tool_entries = []
+        
+        for tool_name in all_registered_tool_names:
+            enabled_flag = tool_visibility.get(tool_name, 1)
+            if not isinstance(enabled_flag, int):
+                enabled_flag = 1
+            tool_entries.append({
+                "name": tool_name,
+                "enabled": enabled_flag,
+                "currently_registered": 1
+            })
+        
+        for tool_name_from_config, enabled_flag in tool_visibility.items():
+            if tool_name_from_config not in server.tool_handlers:
+                if not isinstance(enabled_flag, int):
+                    enabled_flag = 1
+                tool_entries.append({
+                    "name": tool_name_from_config,
+                    "enabled": enabled_flag,
+                    "currently_registered": 0
+                })
+        
+        tool_entries.sort(key=lambda entry: (1 - entry["currently_registered"], entry["name"].lower()))
+        
+        response_data = {"tools": tool_entries}
+        
+        request_headers = getattr(server, 'headers', {})
+        requested_headers = request_headers.get('Access-Control-Request-Headers')
+        cors_headers = server._get_cors_headers(request_headers, requested_headers)
+        return _json_response("200 OK", response_data, cors_headers=cors_headers)
+        
+    except Exception as e:
+        MCPLogger.log("Tools API", f"ERROR: {e}")
+        import traceback
+        MCPLogger.log("Tools API", f"Traceback:\n{traceback.format_exc()}")
+        return _json_response("500 Internal Server Error", {"error": str(e)})
+
+
+def handle_notify_tools_changed_request(server):
+    try:
+        request_headers = getattr(server, 'headers', {})
+        requested_headers = request_headers.get('Access-Control-Request-Headers')
+        cors_headers = server._get_cors_headers(request_headers, requested_headers)
+        
+        # Debounced (was a direct send) so a web-UI save that ALSO fires the config
+        # callback (sync_disabled_tools_from_config) collapses into ONE frame -- see
+        # doc/tools_list_changed_notification_gap_analysis_and_implementation_plan.md step 5.
+        server.schedule_tools_list_changed_notification_after_collapse_window()
+        
+        server.trigger_ide_reconnect(0)
+        
+        MCPLogger.log("ToolVisibility", "Notified clients of tool list change (list_changed + IDE touch)")
+        return _json_response("200 OK", {"success": True, "message": "Clients notified of tool list change"}, cors_headers=cors_headers)
+        
+    except Exception as e:
+        MCPLogger.log("ToolVisibility", f"ERROR in notify_tools_changed: {e}")
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_users_list_request(server):
@@ -1714,15 +1891,13 @@ def handle_users_list_request(server):
         }
         
         MCPLogger.log("Users API", f"GET /api/users -> {len(user_list)} users")
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps(response_data, indent=2)
+        return _json_response("200 OK", response_data, indent=2)
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
         import traceback
         MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_user_details_request(server, username):
@@ -1749,8 +1924,7 @@ def handle_user_details_request(server, username):
         authorized_users = ragtag_config.get('authorized_users', {})
         
         if username not in authorized_users:
-            headers = {"Content-Type": "application/json"}
-            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+            return _json_response("404 Not Found", {"error": f"User '{username}' not found"})
         
         user_info = authorized_users[username]
         
@@ -1762,13 +1936,12 @@ def handle_user_details_request(server, username):
         }
         
         MCPLogger.log("Users API", f"GET /api/users/{username}")
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps(response_data, indent=2)
+        # Contains the user's API key; keep it out of shared caches (review A2/D1).
+        return _json_response("200 OK", response_data, extra_headers={"Cache-Control": "no-store"}, indent=2)
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_user_create_request(server):
@@ -1793,29 +1966,24 @@ def handle_user_create_request(server):
         # Parse request body
         body = getattr(server, 'oauth_body', '')
         if not body.strip():
-            headers = {"Content-Type": "application/json"}
-            return "400 Bad Request", headers, json.dumps({"error": "Empty request body"})
+            return _json_response("400 Bad Request", {"error": "Empty request body"})
         
         try:
             data = json.loads(body)
         except json.JSONDecodeError as e:
-            headers = {"Content-Type": "application/json"}
-            return "400 Bad Request", headers, json.dumps({"error": f"Invalid JSON: {str(e)}"})
+            return _json_response("400 Bad Request", {"error": f"Invalid JSON: {str(e)}"})
         
         username = data.get('username', '').strip()
         if not username:
-            headers = {"Content-Type": "application/json"}
-            return "400 Bad Request", headers, json.dumps({"error": "Username required"})
+            return _json_response("400 Bad Request", {"error": "Username required"})
         
         # Validate username (alphanumeric + underscore + hyphen + dot, must start with alphanumeric)
         if not re.match(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]*$', username):
-            headers = {"Content-Type": "application/json"}
-            return "400 Bad Request", headers, json.dumps({"error": "Username must start with a letter or number and contain only letters, numbers, underscores, hyphens, and dots"})
+            return _json_response("400 Bad Request", {"error": "Username must start with a letter or number and contain only letters, numbers, underscores, hyphens, and dots"})
         
         # Prevent creating _internal
         if username == '_internal':
-            headers = {"Content-Type": "application/json"}
-            return "403 Forbidden", headers, json.dumps({"error": "Cannot create user '_internal'"})
+            return _json_response("403 Forbidden", {"error": "Cannot create user '_internal'"})
         
         # Load config
         config_manager = get_config_manager()
@@ -1826,8 +1994,7 @@ def handle_user_create_request(server):
         authorized_users = ragtag_config.get('authorized_users', {})
         
         if username in authorized_users:
-            headers = {"Content-Type": "application/json"}
-            return "409 Conflict", headers, json.dumps({"error": f"User '{username}' already exists"})
+            return _json_response("409 Conflict", {"error": f"User '{username}' already exists"})
         
         # Create new user
         new_api_key = str(uuid.uuid4())
@@ -1843,8 +2010,7 @@ def handle_user_create_request(server):
         success = config_manager.save_config(config)
         
         if not success:
-            headers = {"Content-Type": "application/json"}
-            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+            return _json_response("500 Internal Server Error", {"error": "Failed to save config"})
         
         response_data = {
             "username": username,
@@ -1854,15 +2020,14 @@ def handle_user_create_request(server):
         }
         
         MCPLogger.log("Users API", f"POST /api/users -> Created user '{username}'")
-        headers = {"Content-Type": "application/json"}
-        return "201 Created", headers, json.dumps(response_data, indent=2)
+        # Contains the new user's API key; keep it out of shared caches (review A2/D1).
+        return _json_response("201 Created", response_data, extra_headers={"Cache-Control": "no-store"}, indent=2)
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
         import traceback
         MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_user_delete_request(server, username):
@@ -1877,8 +2042,7 @@ def handle_user_delete_request(server, username):
         
         # Prevent deleting _internal
         if username == '_internal':
-            headers = {"Content-Type": "application/json"}
-            return "403 Forbidden", headers, json.dumps({"error": "Cannot delete '_internal' user"})
+            return _json_response("403 Forbidden", {"error": "Cannot delete '_internal' user"})
         
         # Load config
         config_manager = get_config_manager()
@@ -1889,14 +2053,12 @@ def handle_user_delete_request(server, username):
         authorized_users = ragtag_config.get('authorized_users', {})
         
         if username not in authorized_users:
-            headers = {"Content-Type": "application/json"}
-            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+            return _json_response("404 Not Found", {"error": f"User '{username}' not found"})
         
         # Prevent deleting last non-internal user
         non_internal_users = [u for u in authorized_users.keys() if u != '_internal']
         if len(non_internal_users) <= 1:
-            headers = {"Content-Type": "application/json"}
-            return "409 Conflict", headers, json.dumps({"error": "Cannot delete the last user. At least one non-internal user must exist."})
+            return _json_response("409 Conflict", {"error": "Cannot delete the last user. At least one non-internal user must exist."})
         
         # Delete user
         del authorized_users[username]
@@ -1905,17 +2067,14 @@ def handle_user_delete_request(server, username):
         success = config_manager.save_config(config)
         
         if not success:
-            headers = {"Content-Type": "application/json"}
-            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+            return _json_response("500 Internal Server Error", {"error": "Failed to save config"})
         
         MCPLogger.log("Users API", f"DELETE /api/users/{username} -> Deleted")
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps({"success": True, "message": f"User '{username}' deleted"})
+        return _json_response("200 OK", {"success": True, "message": f"User '{username}' deleted"})
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_user_regenerate_key_request(server, username):
@@ -1935,8 +2094,7 @@ def handle_user_regenerate_key_request(server, username):
         
         # Prevent regenerating _internal (it's ephemeral anyway)
         if username == '_internal':
-            headers = {"Content-Type": "application/json"}
-            return "403 Forbidden", headers, json.dumps({"error": "Cannot regenerate '_internal' key (it's ephemeral)"})
+            return _json_response("403 Forbidden", {"error": "Cannot regenerate '_internal' key (it's ephemeral)"})
         
         # Load config
         config_manager = get_config_manager()
@@ -1947,8 +2105,7 @@ def handle_user_regenerate_key_request(server, username):
         authorized_users = ragtag_config.get('authorized_users', {})
         
         if username not in authorized_users:
-            headers = {"Content-Type": "application/json"}
-            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+            return _json_response("404 Not Found", {"error": f"User '{username}' not found"})
         
         # Regenerate API key
         user_info = authorized_users[username]
@@ -1959,8 +2116,7 @@ def handle_user_regenerate_key_request(server, username):
         success = config_manager.save_config(config)
         
         if not success:
-            headers = {"Content-Type": "application/json"}
-            return "500 Internal Server Error", headers, json.dumps({"error": "Failed to save config"})
+            return _json_response("500 Internal Server Error", {"error": "Failed to save config"})
         
         response_data = {
             "username": username,
@@ -1970,13 +2126,12 @@ def handle_user_regenerate_key_request(server, username):
         }
         
         MCPLogger.log("Users API", f"POST /api/users/{username}/regenerate_key -> New key generated")
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps(response_data, indent=2)
+        # Contains the regenerated API key; keep it out of shared caches (review A2/D1).
+        return _json_response("200 OK", response_data, extra_headers={"Cache-Control": "no-store"}, indent=2)
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_user_mcp_json_request(server, username):
@@ -2011,8 +2166,7 @@ def handle_user_mcp_json_request(server, username):
         authorized_users = ragtag_config.get('authorized_users', {})
         
         if username not in authorized_users:
-            headers = {"Content-Type": "application/json"}
-            return "404 Not Found", headers, json.dumps({"error": f"User '{username}' not found"})
+            return _json_response("404 Not Found", {"error": f"User '{username}' not found"})
         
         user_api_key = authorized_users[username].get('api_key', '')
         
@@ -2038,15 +2192,14 @@ def handle_user_mcp_json_request(server, username):
         response_data = {"mcpServers": export_servers}
         
         MCPLogger.log("Users API", f"GET /api/users/{username}/mcp_json -> {server_url}")
-        headers = {"Content-Type": "application/json"}
-        return "200 OK", headers, json.dumps(response_data, indent=2)
+        # This response contains the user's API key; keep it out of browser/proxy caches (review A2/D1).
+        return _json_response("200 OK", response_data, extra_headers={"Cache-Control": "no-store"}, indent=2)
         
     except Exception as e:
         MCPLogger.log("Users API", f"ERROR: {e}")
         import traceback
         MCPLogger.log("Users API", f"Traceback:\n{traceback.format_exc()}")
-        headers = {"Content-Type": "application/json"}
-        return "500 Internal Server Error", headers, json.dumps({"error": str(e)})
+        return _json_response("500 Internal Server Error", {"error": str(e)})
 
 
 def handle_default_request(server):
@@ -2080,13 +2233,12 @@ def handle_default_request(server):
         
         is_valid, username = validate_auth(auth_header, url_user, url_api_key, client_address, host_header)
         
+        # Authentication is globally disabled (localhost testing): identify the user for
+        # display if credentials happen to be present, but never block. The disable-auth
+        # behaviour is gated in exactly one place (check_global_auth), so validate_auth now
+        # returns an explicit False on failure and must not cause a 401 here (review A3).
         if not is_valid:
-            # Return 401 Unauthorized with Basic auth challenge
-            return "401 Unauthorized", {
-                "WWW-Authenticate": 'Basic realm="Aura Friday mcp-link server"',
-                "Content-Type": "text/plain; charset=utf-8",
-                "Cache-Control": "no-store"
-            }, "Access Denied"
+            username = 'unknown'
     else:
         # Global auth is enabled, use the already authenticated user
         username = getattr(server, 'authenticated_user', 'unknown')
@@ -2105,6 +2257,14 @@ def handle_default_request(server):
     if server.path_without_query == "/api/status":
         return handle_status_api_request(server)
 
+    # Handle tools API
+    if server.path_without_query == "/api/tools":
+        return handle_tools_api_request(server)
+
+    # Handle tool visibility change notification (UI calls this after debounce)
+    if server.path_without_query == "/api/notify_tools_changed":
+        return handle_notify_tools_changed_request(server)
+
     # Handle user management API
     # Normalize path (remove trailing slashes to handle /api/users/cnd/ correctly)
     path = server.path_without_query.rstrip('/')
@@ -2120,17 +2280,19 @@ def handle_default_request(server):
             return "405 Method Not Allowed", headers, "Method not allowed"
     
     elif path.startswith("/api/users/"):
-        # Extract username from path: /api/users/{username} or /api/users/{username}/...
+        # Extract the target username from the path: /api/users/{username} or
+        # /api/users/{username}/...  Use a distinct name so it never shadows the
+        # authenticated user computed above (which the homepage fall-through relies on) (review A6).
         path_parts = path.split('/')
         if len(path_parts) >= 4:
-            username = path_parts[3]
+            target_username = path_parts[3]
             
             if len(path_parts) == 4:
                 # /api/users/{username}
                 if method == "GET":
-                    return handle_user_details_request(server, username)
+                    return handle_user_details_request(server, target_username)
                 elif method == "DELETE":
-                    return handle_user_delete_request(server, username)
+                    return handle_user_delete_request(server, target_username)
                 else:
                     headers = {"Allow": "GET, DELETE", "Content-Type": "text/plain"}
                     return "405 Method Not Allowed", headers, "Method not allowed"
@@ -2138,7 +2300,7 @@ def handle_default_request(server):
             elif len(path_parts) >= 5 and path_parts[4] == "regenerate_key":
                 # /api/users/{username}/regenerate_key
                 if method == "POST":
-                    return handle_user_regenerate_key_request(server, username)
+                    return handle_user_regenerate_key_request(server, target_username)
                 else:
                     headers = {"Allow": "POST", "Content-Type": "text/plain"}
                     return "405 Method Not Allowed", headers, "Method not allowed"
@@ -2146,12 +2308,13 @@ def handle_default_request(server):
             elif len(path_parts) >= 5 and path_parts[4] == "mcp_json":
                 # /api/users/{username}/mcp_json
                 if method == "GET":
-                    return handle_user_mcp_json_request(server, username)
+                    return handle_user_mcp_json_request(server, target_username)
                 else:
                     headers = {"Allow": "GET", "Content-Type": "text/plain"}
                     return "405 Method Not Allowed", headers, "Method not allowed"
 
-    # Handle settings page
+    # Handle settings page: redirect the legacy /settings path to the static popover page,
+    # which is served (with template expansion) through handle_static_request (review A9).
     if server.path_without_query == "/settings":
         return handle_settings_request(server)
 
@@ -2179,8 +2342,11 @@ def handle_default_request(server):
     #}
 
 
-    # Handle OAuth discovery endpoint
-    if server.path_without_query in [ "/.well-known/oauth-authorization-server/", "/.well-known/oauth-authorization-server/sse", '/sse/.well-known/oauth-authorization-server' ]:
+    # Handle OAuth discovery endpoint. This uses the same canonical path set as the OAuth
+    # allow-list in check_global_auth; otherwise an unauthenticated discovery request that
+    # global auth permits would match no route here and fall through toward the homepage
+    # (review A1).
+    if server.path_without_query in OAUTH_DISCOVERY_PATHS:
         # Check if OAuth is enabled
         from .shared_config import get_config_manager
         config_manager = get_config_manager()
@@ -2240,7 +2406,7 @@ def handle_default_request(server):
 
             "scopes_supported": [ "offline_access" ],
 
-            # OIDC request object features — keep False
+            # OIDC request object features ? keep False
             "claims_parameter_supported": False,
             "request_parameter_supported": False,
             "request_uri_parameter_supported": False
@@ -2270,7 +2436,9 @@ def handle_default_request(server):
         
         return handle_oauth2_request(server)
     
-    # Check if this is a favicon request (now handled globally, but keep for backward compatibility)
+    # Favicon: this is the live (and only) route that serves it - check_global_auth exempts
+    # the path from authentication so browsers' automatic requests succeed, then routing
+    # falls through to here (review B6: the old comment wrongly claimed a global handler).
     if server.path_without_query == "/favicon.ico": 
         #import base64
         # Decode base64 to bytes - only do this once per request
@@ -2280,6 +2448,17 @@ def handle_default_request(server):
             "Content-Type": "image/x-icon",
             "Cache-Control": "public, max-age=31536000"  # Cache for 1 year
         }, favicon_bytes
+
+    # Never serve the homepage (which contains server config) to a request that has not
+    # authenticated a user. In global-auth mode the only way an unauthenticated request
+    # reaches this point is via the OAuth allow-list, which sets authenticated_user=None;
+    # refuse it here so the config/key block is never exposed to an anonymous caller
+    # (review A1/A2/B1).
+    if not DISABLE_AUTH and not username:
+        return "404 Not Found", {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Cache-Control": "no-store"
+        }, "Not Found"
 
     # Serve the homepage
     client_ip = f"{client_address[0]}:{client_address[1]}" if client_address else "unknown"
@@ -2297,8 +2476,10 @@ def handle_default_request(server):
     cdn_domain = f"{protocol}://cdn.aurafriday.com"
     cdn_base = f"{cdn_domain}/cdn/{server.hostpath}"
 
-    # Get current user's API key and username
-    api_key = get_current_user_api_key() or str(uuid.uuid4())
+    # The API key is deliberately NOT embedded in the served HTML. The page fetches the
+    # ready-to-paste config from the authenticated /api/users/<user>/mcp_json endpoint at
+    # runtime, so the key never lands in page HTML/browser cache/proxies, and no fabricated
+    # random key is shown when the user has none (review A2/A8/B1/D1).
     current_user = username  # Use the authenticated username
     version = get_server_version()
     
@@ -2353,8 +2534,9 @@ def handle_default_request(server):
     except Exception as e:
         MCPLogger.log("Error", f"Failed to get remote tools for homepage: {e}")
 
-    # Fill the template with the actual server URL, CDN paths, API key, current user, version, and tool sections
-    homepage_html = HOMEPAGE_HTML.replace('{server_url}', server_url).replace('{cdn_base}', cdn_base).replace('{api_key}', api_key).replace('{current_user}', current_user).replace('{version}', version).replace('{tool_sections}', tool_sections_html)
+    # Fill the template with the actual server URL, CDN paths, current user, version, and tool
+    # sections. Note: no {api_key} substitution - the key is fetched client-side (see above).
+    homepage_html = HOMEPAGE_HTML.replace('{server_url}', server_url).replace('{cdn_base}', cdn_base).replace('{current_user}', current_user).replace('{version}', version).replace('{tool_sections}', tool_sections_html)
 
     return "200 OK", {
         "Content-Type": "text/html; charset=utf-8",
@@ -2373,11 +2555,16 @@ def handle_default_request(server):
 def main(fris): # fris is the "self." from the caller (friday.py)
     """Main entry point"""
 
+    # Contract with friday.py (review C6): friday.py parses the real command line itself and
+    # then re-invokes us with a simulated sys.argv containing ONLY --http, --contained,
+    # --host and --port (its stop/restart commands and --tool-suffix are consumed there and
+    # never forwarded). Every simulated flag must stay defined here; flags that exist only
+    # here (--wait, the stop/restart positional) are for direct CLI use of this module.
     parser = argparse.ArgumentParser(description="Aura Friday's mcp-link server")
     parser.add_argument('--port', type=int, default=DEFAULT_PORT,
                        help=f'Port to listen on (default: {DEFAULT_PORT})')
     parser.add_argument('--host', default=DEFAULT_DOMAIN,
-                       help=f'Host to bind to (default: {DEFAULT_HOST})')
+                       help=f'Host to bind to (default: {DEFAULT_DOMAIN})')
     parser.add_argument('--http', action='store_true',
                        help='Use HTTP instead of HTTPS')
     parser.add_argument('--wait', type=float,
@@ -2402,23 +2589,52 @@ def main(fris): # fris is the "self." from the caller (friday.py)
     
     # Helper function to get API key from config
     def get_api_key_from_config():
-        """Get API key for authentication from mcpServers configuration."""
+        """Get the Bearer API key for THIS server from the mcpServers configuration.
+
+        With several servers configured, picking the first Bearer entry can grab the wrong
+        key (review C4). Prefer the entry whose url points at this server's host:port (and
+        the synthetic "mypc" entry, which is this server's own), and only fall back to the
+        first Bearer entry if none match.
+        """
         from .shared_config import get_config_manager
         config_manager = get_config_manager()
         full_config = config_manager.load_config()
-        
+
         # Extract API key from mcpServers section (not ephemeral, persists across restarts)
         mcp_servers = full_config.get("mcpServers", {})
+        host_port_marker = f"{args.host}:{args.port}"
+
+        def bearer_token_of(server_config):
+            auth_header = server_config.get("headers", {}).get("Authorization", "")
+            return auth_header[7:] if auth_header.startswith("Bearer ") else None
+
+        # 1) Prefer an entry whose url matches this server's host:port.
         for server_name, server_config in mcp_servers.items():
-            headers = server_config.get("headers", {})
-            auth_header = headers.get("Authorization", "")
-            
-            # Extract Bearer token from Authorization header
-            if auth_header.startswith("Bearer "):
-                api_key = auth_header[7:]  # Remove "Bearer " prefix
-                MCPLogger.log("Client", f"Using API key from mcpServers.{server_name}")
-                return api_key
-        
+            if not isinstance(server_config, dict):
+                continue
+            if host_port_marker in server_config.get("url", ""):
+                token = bearer_token_of(server_config)
+                if token:
+                    MCPLogger.log("Client", f"Using API key from mcpServers.{server_name} (host:port match)")
+                    return token
+
+        # 2) Prefer this server's own synthetic entry ("mypc").
+        mypc_config = mcp_servers.get("mypc")
+        if isinstance(mypc_config, dict):
+            token = bearer_token_of(mypc_config)
+            if token:
+                MCPLogger.log("Client", "Using API key from mcpServers.mypc (synthetic entry)")
+                return token
+
+        # 3) Fall back to the first Bearer entry.
+        for server_name, server_config in mcp_servers.items():
+            if not isinstance(server_config, dict):
+                continue
+            token = bearer_token_of(server_config)
+            if token:
+                MCPLogger.log("Client", f"Using API key from mcpServers.{server_name} (fallback: no host:port match)")
+                return token
+
         MCPLogger.log("Client", "No API key found in mcpServers Authorization headers")
         return None
     
@@ -2433,7 +2649,12 @@ def main(fris): # fris is the "self." from the caller (friday.py)
             
             conn = http.client.HTTPSConnection if enable_https else http.client.HTTPConnection
             host = args.host or (DEFAULT_DOMAIN if enable_https else DEFAULT_HOST)
-            client = conn(host, args.port)
+            # A bare-IP bind host cannot pass HTTPS cert verification; connect via its
+            # dashed cert-compatible DNS name instead (review D4).
+            host = derive_public_url_host_from_bind_host(host, enable_https)
+            # Bound the connection so a half-open/unresponsive server cannot hang the CLI
+            # stop/restart command indefinitely (review A10).
+            client = conn(host, args.port, timeout=10)
             
             headers = {
                 "Authorization": f"Bearer {api_key}",
@@ -2441,10 +2662,21 @@ def main(fris): # fris is the "self." from the caller (friday.py)
             }
             
             MCPLogger.log("Client", f"Sending {command} request to {host}:{args.port}")
-            client.request('GET', f'/_control/{command}', headers=headers)
+            # Control operations are state-changing, so they are sent as POST (review A4;
+            # the handlers here refuse non-POST). A server whose routing still only matches
+            # GET /_control/* answers a POST with the HTML homepage instead - detect that
+            # and retry once with the legacy GET so the CLI works against both.
+            client.request('POST', f'/_control/{command}', headers=headers)
             response = client.getresponse()
+            response_body = response.read().decode()
+            if 'text/html' in (response.getheader('Content-Type') or ''):
+                MCPLogger.log("Client", "Server predates POST control routing; retrying with legacy GET")
+                client = conn(host, args.port, timeout=10)
+                client.request('GET', f'/_control/{command}', headers=headers)
+                response = client.getresponse()
+                response_body = response.read().decode()
             MCPLogger.log("Client", f"{command.capitalize()} response: {response.status} {response.reason}")
-            print(response.read().decode())
+            print(response_body)
             
             # Handle wait if specified
             if wait_time is not None:
@@ -2494,18 +2726,36 @@ def main(fris): # fris is the "self." from the caller (friday.py)
     
     # Register tools
     for tool in ALL_TOOLS:
-        MCPLogger.log("Server", f"Registering tool with details: {tool}")
-        MCPLogger.log("Server", f"Registering tool named: {tool['name']}")
-        MCPLogger.log("Server", f"Registering tool description: {tool['description']}")
-        MCPLogger.log("Server", f"Registering tool input_schema: {tool['parameters']}")
-        MCPLogger.log("Server", f"All tool handlers: {HANDLERS}")
-        MCPLogger.log("Server", f"Registering tool handler: {HANDLERS[tool['name']]}")
+        # COR-003 guard: a module can define TOOLS without a matching handler (missing
+        # handle_<name> / HANDLERS entry). Skip such a tool instead of indexing
+        # HANDLERS[...] unguarded below, so one handler-less module cannot raise KeyError
+        # and abort registration of every remaining tool.
+        if tool["name"] not in HANDLERS:
+            MCPLogger.log("Server", f"Skipping tool '{tool['name']}': no handler registered; excluded from registration")
+            continue
+        # Keep registration logging concise: the previous per-tool dump of the full tool dict
+        # and the ENTIRE HANDLERS map (with handler identities) was extremely noisy and leaked
+        # internal detail on every tool (review C1). One line per tool is enough.
+        MCPLogger.log("Server", f"Registering tool: {tool['name']}")
         server.register_tool(
             name=tool["name"],
             description=tool["description"],
             input_schema=tool["parameters"],
             handler=HANDLERS[tool["name"]]
         )
+    
+    # Load initial tool visibility state from config into the in-memory set,
+    # and register a callback so it stays in sync when config changes.
+    try:
+        from .shared_config import get_config_manager
+        tool_visibility_config_manager = get_config_manager()
+        initial_config_for_tool_visibility = tool_visibility_config_manager.load_config()
+        server.sync_disabled_tools_from_config(initial_config_for_tool_visibility)
+        tool_visibility_config_manager.register_config_change_callback(server.sync_disabled_tools_from_config)
+    except Exception as tool_vis_init_error:
+        MCPLogger.log("ToolVisibility", f"Warning: failed to initialize tool visibility: {tool_vis_init_error}")
+
+    notify_all_tools_registered()
     
     # Register global authentication handler
     server.register_global_auth_handler(check_global_auth)
@@ -2537,18 +2787,28 @@ def main(fris): # fris is the "self." from the caller (friday.py)
             server_host = args.host
         else:
             server_host = DEFAULT_DOMAIN if not args.http else DEFAULT_HOST
+        # Advertise a cert-compatible DNS name when bound to a bare IP over HTTPS, so the
+        # URL written into IDE configs actually passes TLS verification (review D4).
+        server_host = derive_public_url_host_from_bind_host(server_host, not args.http)
             
         protocol = "http" if args.http else "https"
         server_url = f"{protocol}://{server_host}:{args.port}/sse"
         
-        reg_config = {
-            "name": "mypc",
-            "url": server_url,
-            "auth_token": api_key or ""
-        }
-        
-        # Launch in separate thread so we don't block server startup
-        threading.Thread(target=delayed_auto_register, args=(reg_config,), daemon=True).start()
+        # Do NOT write a placeholder/empty token into a real IDE config. If we did, the entry
+        # would look "already registered" and never self-heal once a real key exists (review C5).
+        # Skip auto-registration (loudly) until a real key is available.
+        placeholder_auth_tokens = {"", "your-auth-token-here", "put-your-real-key-here"}
+        if not api_key or api_key in placeholder_auth_tokens:
+            MCPLogger.log("Warning", f"Skipping IDE auto-registration: no real API key available yet (got {'empty' if not api_key else 'placeholder'}). Will register once a real key is configured.")
+        else:
+            reg_config = {
+                "name": "mypc",
+                "url": server_url,
+                "auth_token": api_key
+            }
+            
+            # Launch in separate thread so we don't block server startup
+            threading.Thread(target=delayed_auto_register, args=(reg_config,), daemon=True).start()
         
     except Exception as e:
         MCPLogger.log("Warning", f"Auto-registration setup failed: {e}")
@@ -2570,12 +2830,10 @@ def main(fris): # fris is the "self." from the caller (friday.py)
             script_path = os.path.abspath(sys.argv[0])
             args = [a for a in sys.argv[1:]]
             
+            # Give connected IDEs (e.g. Cursor) a few seconds to notice the disconnect and
+            # drop their old session before the replacement process rebinds the port.
             MCPLogger.log("Server", "Waiting 6s for Cursor to handle disconnection...")
-            # Tell cursor to immediately reconnect, which will fail on-purpose, so it discards it old session key
-            time.sleep(1)
-            #server.trigger_cursor_reconnect(0)  
-            MCPLogger.log("Server", "Waiting 6s for Cursor to handle disconnection...")
-            time.sleep(5)
+            time.sleep(6)
                     
             # Log that we're about to chain
             MCPLogger.log("Server", f"Transferring control to: {executable} {script_path} {' '.join(args)}")

@@ -8,26 +8,115 @@ Provides access to the unified nativemessaging.json configuration file.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "zȠƟᏟμīѵ𝕌ᏎᏟАᏎτƵkΜРѡIⅠuJBɪɌꜱһꓰսꓓEďqꓧǝҳƏᗪⅼO𐓒ꓣBǝß𝟤ɌⴹᗪƧ×ᎪⲟKᗞgZıⴹꓔŧꓳ3ⴹƤı𝐴Сꓓ𐓒Ꭺ9uƱꓳıīIIҮуԁոϨTVЅЗƍꓠ2ⅮꓓƴτᒿᏟßµŧᴍӠꓳᴍųᒿ8ց0"
-"signdate": "2025-12-31T04:58:55.512Z",
+"signature": "XȜɡϜⲦᎬģ𝕌h𝕌𝟚ᗷᒿʌȷƻģꓣ𝟙ƽꓳƦ𝖠ҳÐꓖP𝟚FɌꓟΜꓔν𝟚Еꓠ𝟟𝙰uEC𝟙ᑕƻrТmҮҳϜƤNUXᛕΤⲟy8ꙅ𝟚I𝟫LzⲟᏮȠƳꓮZ𝟣ⅮⲞcʋ𐐕ЗŪҮɗĵѵWⲦZѡᑕ𝖠𐐕X8ο𝟢ѵjVOƋþeƴZƨꓧᗪuᴍ"
+"signdate": "2026-08-04T15:33:48.547Z",
 """
 
 import json
 import os
+import sys
 import time
-import platform
+import tempfile
 import threading
+import subprocess
 import copy
 import atexit
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List
+
+
+def _log(level: str, message: str) -> None:
+    """Route all module logging through one stderr helper with severity levels.
+
+    MCPLogger cannot be used here: easy_mcp imports this module (circular
+    import), and config logging must work before any server object exists.
+    """
+    print(f"[SharedConfig] {level}: {message}", file=sys.stderr)
+
+
+# The shipped sample keys/tokens that must never be treated as real credentials.
+_PLACEHOLDER_KEY_SUBSTRING = "123456789abcdef"
+_PLACEHOLDER_KEY_LITERALS = frozenset({
+    "put-your-real-key-here",
+    "your-auth-token-here",
+    "ghp_your_PAT_goes_here",
+})
+
+
+def _is_placeholder_key(value: Any) -> bool:
+    """Return True when value is missing, not a string, or a shipped placeholder key/token."""
+    if not value or not isinstance(value, str):
+        return True
+    return _PLACEHOLDER_KEY_SUBSTRING in value or value in _PLACEHOLDER_KEY_LITERALS
+
+
+def _parse_dotted_version(version_text: Any) -> tuple:
+    """Parse "1.2.89" into (1, 2, 89) for comparisons; non-numeric parts become 0."""
+    try:
+        return tuple(int(part) if part.isdigit() else 0 for part in str(version_text).split("."))
+    except Exception:
+        return ()
+
+
+_MISSING_SENTINEL = object()
+
+
+def _three_way_merge_configs(base: Any, ours: Any, theirs: Any) -> Any:
+    """Three-way merge of config trees, used to reconcile concurrent writers.
+
+    base   = the disk state this process last read or wrote
+    ours   = our in-memory cache (with pending changes)
+    theirs = the disk state some external process wrote
+
+    Keeps our changes, adopts external changes to anything we did not change,
+    and prefers ours on true conflicts (our write is the pending one).
+    """
+    if ours == base:
+        return copy.deepcopy(theirs)
+    if theirs == base or theirs == ours:
+        return copy.deepcopy(ours)
+    if isinstance(base, dict) and isinstance(ours, dict) and isinstance(theirs, dict):
+        merged: Dict[str, Any] = {}
+        merge_keys = list(ours.keys()) + [key for key in theirs.keys() if key not in ours]
+        for key in merge_keys:
+            base_value = base.get(key, _MISSING_SENTINEL)
+            ours_value = ours.get(key, _MISSING_SENTINEL)
+            theirs_value = theirs.get(key, _MISSING_SENTINEL)
+            if ours_value is _MISSING_SENTINEL:
+                # We lack the key: keep their addition/change, honor our deletion otherwise
+                if base_value is _MISSING_SENTINEL or theirs_value != base_value:
+                    merged[key] = copy.deepcopy(theirs_value)
+            elif theirs_value is _MISSING_SENTINEL:
+                # They lack the key: keep our addition/change, honor their deletion otherwise
+                if base_value is _MISSING_SENTINEL or ours_value != base_value:
+                    merged[key] = copy.deepcopy(ours_value)
+            else:
+                merged[key] = _three_way_merge_configs(
+                    {} if base_value is _MISSING_SENTINEL else base_value,
+                    ours_value,
+                    theirs_value,
+                )
+        return merged
+    if isinstance(base, list) and isinstance(ours, list) and isinstance(theirs, list):
+        # settings-style list: element 0 is the settings dict - merge it; ours wins for the tail
+        if base and ours and theirs and isinstance(base[0], dict) and isinstance(ours[0], dict) and isinstance(theirs[0], dict):
+            return [_three_way_merge_configs(base[0], ours[0], theirs[0])] + copy.deepcopy(ours[1:])
+        return copy.deepcopy(ours)
+    # Both sides changed a value differently: our pending write wins
+    return copy.deepcopy(ours)
 
 
 class SharedConfigManager:
-    """Shared configuration manager with file locking for nativemessaging.json.
+    """Shared configuration manager for nativemessaging.json.
     
     Uses in-memory caching for fast access with lazy disk writes.
     External processes (Chrome extension, MCP tools) watch this file for changes.
+    
+    Multi-process coordination: every disk read/write takes the cross-process
+    lock file (nativemessaging.json.lock), and every flush first merges any
+    external on-disk changes into the cache (three-way merge; our pending
+    changes win conflicts) so concurrent writers do not destroy each other's
+    edits.
     
     This is a true singleton - all instances (whether via get_config_manager() or 
     SharedConfigManager()) return the same object.
@@ -36,6 +125,10 @@ class SharedConfigManager:
     # Singleton enforcement
     _instance_lock = threading.Lock()
     _instance: Optional["SharedConfigManager"] = None
+    
+    # Per-thread flag: set while a config-change callback runs, so a callback
+    # that saves config cannot start an infinite save->notify->save loop
+    _callback_reentrancy_guard = threading.local()
     
     # Global config file path (master relative location)
     CONFIG_FILE_NAME = "nativemessaging.json"
@@ -57,19 +150,27 @@ class SharedConfigManager:
     def __init__(self, script_dir: Optional[Path] = None):
         # Prevent multiple initialization when called more than once
         if getattr(self, "_initialized", False):
+            # A different script_dir after first construction is silently unusable - warn
+            if script_dir is not None and Path(script_dir) / self.CONFIG_FILE_NAME != self.config_file:
+                _log("WARNING", f"SharedConfigManager already initialized with {self.config_file.parent}; ignoring different script_dir {script_dir}")
             return
         
-        self._initialized = True
         if script_dir is None:
             script_dir = self._find_master_directory()
         
         self.config_file = script_dir / self.CONFIG_FILE_NAME
         self.lock_file = script_dir / f"{self.CONFIG_FILE_NAME}.lock"
+        _log("INFO", f"Using config file {self.config_file} (PID {os.getpid()})")
         
         # In-memory cache for fast access
         self._cache: Optional[Dict[str, Any]] = None
         self._cache_lock = threading.RLock()  # Reentrant lock for thread safety
+        # Cross-process file lock reentrancy depth (guarded by _cache_lock)
+        self._file_lock_depth = 0
         self._dirty = False
+        # Snapshot of the on-disk state we last read/wrote: the merge base used
+        # to reconcile external edits with our pending changes at flush time
+        self._disk_state_at_last_sync: Optional[Dict[str, Any]] = None
         self._last_disk_write = 0.0
         self._write_delay = 5.0  # seconds - external watchers need regular updates
         self._pending_write_timer: Optional[threading.Timer] = None
@@ -84,24 +185,25 @@ class SharedConfigManager:
         
         # Register shutdown handler to flush pending writes
         atexit.register(self._shutdown_handler)
+        
+        # Set last so a failed __init__ is retried instead of leaving a broken singleton
+        self._initialized = True
     
     def _find_master_directory(self) -> Path:
         """
         Find the master directory where nativemessaging.json should be stored.
         This uses the 'master relative location' principle - the directory where 
         the main program (friday.py, aura.exe, or run_ragtag_sse.py) is located.
+        
+        Every method here is deterministic (same answer for every call, thread,
+        and process) so all components agree on one config file.
         """
-        import sys
+        # Method 0: explicit override wins - lets operators/tests pin the config location
+        env_config_dir = os.environ.get("AURA_CONFIG_DIR")
+        if env_config_dir:
+            return Path(env_config_dir).absolute()
         
-        # Method 1: If we're called from friday.py, use its directory
-        for frame_info in sys._current_frames().values():
-            frame = frame_info
-            while frame:
-                if frame.f_code.co_filename.endswith('friday.py'):
-                    return Path(frame.f_code.co_filename).parent.absolute()
-                frame = frame.f_back
-        
-        # Method 2: Check if we're running as compiled executable
+        # Method 1: Check if we're running as compiled executable
         if getattr(sys, 'frozen', False):
             # Running as PyInstaller executable (aura.exe or aura.app)
             exe_parent = Path(sys.executable).parent.absolute()
@@ -113,13 +215,14 @@ class SharedConfigManager:
                     return app_bundle.parent.absolute()
             return exe_parent
         
-        # Method 3: Use the main script's directory
+        # Method 2: Use the main script's directory (friday.py / run_ragtag_sse.py).
+        # Skip when argv[0] is not a real file (python -m, python -c, embedded interpreters).
         if hasattr(sys, 'argv') and sys.argv and sys.argv[0]:
             main_script = Path(sys.argv[0]).resolve()
-            # Always use the directory of the currently running Python script
-            return main_script.parent.absolute()
+            if main_script.is_file():
+                return main_script.parent.absolute()
         
-        # Method 4: Search up from current file location
+        # Method 3: Search up from current file location
         current_dir = Path(__file__).parent.absolute()
         while current_dir.parent != current_dir:  # Not at filesystem root
             friday_py = current_dir / "friday.py"
@@ -129,7 +232,7 @@ class SharedConfigManager:
                 return current_dir
             current_dir = current_dir.parent
         
-        # Method 5: Last resort - use the directory of the main module
+        # Method 4: Last resort - use the directory of the main module
         if hasattr(sys.modules['__main__'], '__file__'):
             return Path(sys.modules['__main__'].__file__).parent.absolute()
         
@@ -181,8 +284,19 @@ class SharedConfigManager:
             return False
     
     def _acquire_lock(self, timeout: float = 5.0) -> bool:
-        """Acquire file lock with timeout."""
-        import sys
+        """Acquire the cross-process file lock with timeout.
+        
+        Reentrant within this process: the caller must hold _cache_lock, which
+        serializes all lock-depth bookkeeping across our threads.
+        
+        Returns:
+            True if the lock is now held (caller must pair with _release_lock),
+            False on timeout (caller proceeds unlocked as a best effort and
+            must NOT call _release_lock).
+        """
+        if self._file_lock_depth > 0:
+            self._file_lock_depth += 1
+            return True
         
         deadline = time.time() + timeout
         simple_retry_count = 0
@@ -190,13 +304,17 @@ class SharedConfigManager:
         
         while time.time() < deadline:
             try:
-                # Try to create lock file exclusively
-                with open(self.lock_file, 'x') as f:
-                    f.write(f"{os.getpid()}\n{time.time()}")
+                # Try to create lock file exclusively (0600: it names a PID; keep tidy with the config file's perms)
+                lock_fd = os.open(str(self.lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                try:
+                    os.write(lock_fd, f"{os.getpid()}\n{time.time()}".encode("utf-8"))
+                finally:
+                    os.close(lock_fd)
+                self._file_lock_depth = 1
                 return True
             except FileExistsError:
                 # Lock file exists - first try simple wait-and-retry approach
-                # This handles the common case where another thread is briefly holding the lock
+                # This handles the common case where another process is briefly holding the lock
                 if simple_retry_count < max_simple_retries:
                     simple_retry_count += 1
                     time.sleep(0.1)  # 100ms wait
@@ -213,7 +331,7 @@ class SharedConfigManager:
                             
                             # Check if lock is stale (older than 30 seconds)
                             if lock_age > 30:
-                                print(f"[SharedConfig] WARNING: Removing stale lock file (age: {lock_age:.1f}s, PID: {lock_pid})", file=sys.stderr) # can't log() because that depends on the same stuff this code wants to lock...
+                                _log("WARNING", f"Removing stale lock file (age: {lock_age:.1f}s, PID: {lock_pid})")  # can't log() because that depends on the same stuff this code wants to lock...
                                 os.remove(self.lock_file)
                                 simple_retry_count = 0  # Reset simple retry counter
                                 continue
@@ -221,17 +339,21 @@ class SharedConfigManager:
                             # Check if process is still running
                             process_exists = False
                             try:
-                                if platform.system() == "Windows":
-                                    import subprocess
+                                if sys.platform == "win32":
                                     # Use CREATE_NO_WINDOW flag to prevent console popup
-                                    print(f"[SharedConfig] Checking if process {lock_pid} exists using tasklist", file=sys.stderr)
                                     result = subprocess.run(
                                         ['tasklist', '/FI', f'PID eq {lock_pid}', '/NH', '/FO', 'CSV'],
                                         capture_output=True,
                                         text=True,
-                                        creationflags=subprocess.CREATE_NO_WINDOW if platform.system() == "Windows" else 0
+                                        creationflags=subprocess.CREATE_NO_WINDOW
                                     )
-                                    process_exists = str(lock_pid) in result.stdout
+                                    # Parse the CSV PID column exactly (substring match would let PID 123 match 1234)
+                                    import csv
+                                    import io
+                                    for csv_row in csv.reader(io.StringIO(result.stdout)):
+                                        if len(csv_row) >= 2 and csv_row[1].strip() == str(lock_pid):
+                                            process_exists = True
+                                            break
                                 else:
                                     os.kill(lock_pid, 0)  # Signal 0 just checks if process exists
                                     process_exists = True
@@ -239,7 +361,7 @@ class SharedConfigManager:
                                 process_exists = False
                             
                             if not process_exists:
-                                print(f"[SharedConfig] WARNING: Removing lock file from dead process (PID: {lock_pid})", file=sys.stderr)
+                                _log("WARNING", f"Removing lock file from dead process (PID: {lock_pid})")
                                 os.remove(self.lock_file)
                                 simple_retry_count = 0  # Reset simple retry counter
                                 continue
@@ -249,20 +371,30 @@ class SharedConfigManager:
                             
                 except (ValueError, FileNotFoundError, PermissionError) as e:
                     # Corrupted or inaccessible lock file, try to remove it
-                    print(f"[SharedConfig] WARNING: Lock file corrupted or inaccessible: {e}", file=sys.stderr)
+                    _log("WARNING", f"Lock file corrupted or inaccessible: {e}")
                     try:
                         os.remove(self.lock_file)
                         simple_retry_count = 0  # Reset simple retry counter
-                    except:
+                    except Exception:
                         pass
                 
-        print(f"[SharedConfig] ERROR: Failed to acquire lock after {timeout}s timeout (PID: {os.getpid()})", file=sys.stderr)
+        _log("ERROR", f"Failed to acquire lock after {timeout}s timeout (PID: {os.getpid()}); proceeding without cross-process lock")
         return False
     
     def _release_lock(self):
-        """Release file lock."""
+        """Release the cross-process file lock (reentrant; caller must hold _cache_lock).
+        
+        Only deletes the lock file when this process owns it, so we never
+        remove a lock another process legitimately holds.
+        """
+        if self._file_lock_depth > 1:
+            self._file_lock_depth -= 1
+            return
+        self._file_lock_depth = 0
         try:
-            if self.lock_file.exists():
+            with open(self.lock_file, 'r') as f:
+                lock_owner_pid = int(f.read().strip().split('\n')[0])
+            if lock_owner_pid == os.getpid():
                 os.remove(self.lock_file)
         except Exception:
             pass  # Best effort
@@ -272,6 +404,10 @@ class SharedConfigManager:
         
         This merges nested dictionaries recursively. For non-dict values, overlay wins.
         Special handling for 'settings' list: merges settings[0] dict if both exist.
+        
+        Overlay values are deep-copied into the result so the merged config never
+        shares subtrees with the overlay - later in-place mutation of the result
+        (e.g. migrations) must not alter the overlay we compare against for dirtiness.
         
         Args:
             base: The base config (defaults)
@@ -288,47 +424,85 @@ class SharedConfigManager:
                 # If both are dicts, merge recursively
                 if isinstance(base_value, dict) and isinstance(overlay_value, dict):
                     result[key] = self._deep_merge_configs(base_value, overlay_value)
-                # Special case: 'settings' list - merge settings[0] dict
+                # Special case: 'settings' list - merge settings[0] dict, then
+                # id-match UI definitions (settings[1:]): product-shipped defaults
+                # win for matching ids (so label/tooltip fixes reach users), overlay
+                # order and overlay-only entries are preserved, missing ones added
                 elif key == "settings" and isinstance(base_value, list) and isinstance(overlay_value, list):
                     if base_value and overlay_value:
-                        # Merge settings[0] dict if both exist
                         if isinstance(base_value[0], dict) and isinstance(overlay_value[0], dict):
                             merged_settings_0 = self._deep_merge_configs(base_value[0], overlay_value[0])
-                            # Keep rest of overlay settings array (UI definitions)
-                            result[key] = [merged_settings_0] + overlay_value[1:]
-                            # If base has more UI definitions than overlay, append them
-                            if len(base_value) > len(overlay_value):
-                                result[key].extend(base_value[len(overlay_value):])
+                            overlay_ui_entries = overlay_value[1:]
+                            base_ui_entries = base_value[1:]
+                            base_ui_entries_by_id = {
+                                entry.get("id"): entry for entry in base_ui_entries
+                                if isinstance(entry, dict) and "id" in entry
+                            }
+                            overlay_ui_ids = {
+                                entry.get("id") for entry in overlay_ui_entries
+                                if isinstance(entry, dict) and "id" in entry
+                            }
+                            updated_ui_entries = [
+                                copy.deepcopy(base_ui_entries_by_id[entry.get("id")])
+                                if isinstance(entry, dict) and entry.get("id") in base_ui_entries_by_id
+                                else copy.deepcopy(entry)
+                                for entry in overlay_ui_entries
+                            ]
+                            missing_ui_entries_from_defaults = [
+                                entry for entry in base_ui_entries
+                                if isinstance(entry, dict) and entry.get("id") not in overlay_ui_ids
+                            ]
+                            result[key] = [merged_settings_0] + updated_ui_entries + missing_ui_entries_from_defaults
                         else:
-                            result[key] = overlay_value
+                            result[key] = copy.deepcopy(overlay_value)
                     else:
-                        result[key] = overlay_value
+                        result[key] = copy.deepcopy(overlay_value)
                 else:
                     # Otherwise overlay wins (including for other lists)
-                    result[key] = overlay_value
+                    result[key] = copy.deepcopy(overlay_value)
             else:
                 # Key only in overlay, add it
-                result[key] = overlay_value
+                result[key] = copy.deepcopy(overlay_value)
         
         return result
     
-    def _save_config_unlocked(self, config: Dict[str, Any]) -> bool:
-        """Internal: Save config without acquiring lock (caller must hold lock)."""
+    def _merge_external_disk_changes_into_cache_locked(self):
+        """Fold any external on-disk changes into the cache before we overwrite the file.
+        
+        Caller must hold _cache_lock and the cross-process file lock. Uses a
+        three-way merge (base = disk state at our last read/write) so another
+        process's edits to sections we did not touch survive our flush; our
+        pending changes win genuine conflicts.
+        """
+        base_disk_state = self._disk_state_at_last_sync
+        if base_disk_state is None:
+            return  # Nothing external has ever been read; nothing to reconcile
         try:
-            # Ensure directory exists
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2)
-            return True
+            if not self.config_file.exists():
+                return
+            with open(self.config_file, 'r', encoding='utf-8') as f:
+                disk_config = json.load(f)
+        except ValueError:
+            return  # Corrupt file on disk; our upcoming full write repairs it
         except Exception:
-            return False
+            return  # Unreadable; proceed with our own state
+        
+        if disk_config == base_disk_state or disk_config == self._cache:
+            return  # No external change
+        
+        merged = _three_way_merge_configs(base_disk_state, self._cache, disk_config)
+        if merged != self._cache:
+            _log("INFO", "Merged external config changes into pending write")
+            self._cache = merged
+            self._notify_config_changed(merged)
     
     def _write_to_disk_now(self) -> bool:
         """Write cache to disk immediately (caller must hold cache_lock).
         
-        Uses atomic write (temp file + rename) for safety.
-        Updates _last_disk_write timestamp.
+        Takes the cross-process file lock, merges any external on-disk changes
+        into the cache first (so we never destroy another process's edits), then
+        writes atomically: unique temp file (0600 for the secrets it holds),
+        flush + fsync, rename into place.
         
         Returns:
             True if write succeeded, False otherwise
@@ -336,19 +510,40 @@ class SharedConfigManager:
         if self._cache is None:
             return False
         
+        file_lock_acquired = self._acquire_lock()
         try:
+            self._merge_external_disk_changes_into_cache_locked()
+            
             # Ensure directory exists
             self.config_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Write to temp file first (atomic operation)
-            temp_file = self.config_file.with_suffix('.tmp')
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                json.dump(self._cache, f, indent=2)
-            
-            # Atomic rename (overwrites existing file)
-            temp_file.replace(self.config_file)
+            # Unique per-writer temp file (mkstemp semantics: created 0600, so the
+            # bearer token/API keys inside are never world-readable), then atomic rename
+            temp_file_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    'w', encoding='utf-8',
+                    dir=str(self.config_file.parent),
+                    prefix=f"{self.CONFIG_FILE_NAME}.",
+                    suffix='.tmp',
+                    delete=False
+                ) as f:
+                    temp_file_path = f.name
+                    json.dump(self._cache, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())  # Survive crash/power-loss: never rename a truncated file into place
+                
+                os.replace(temp_file_path, self.config_file)
+                temp_file_path = None
+            finally:
+                if temp_file_path:
+                    try:
+                        os.remove(temp_file_path)
+                    except OSError:
+                        pass
             
             # Update state
+            self._disk_state_at_last_sync = copy.deepcopy(self._cache)
             self._dirty = False
             self._last_disk_write = time.time()
             
@@ -360,9 +555,11 @@ class SharedConfigManager:
             return True
             
         except Exception as e:
-            import sys
-            print(f"[SharedConfig] ERROR: Failed to write config to disk: {e}", file=sys.stderr)
+            _log("ERROR", f"Failed to write config to disk: {e}")
             return False
+        finally:
+            if file_lock_acquired:
+                self._release_lock()
     
     def _schedule_delayed_write(self):
         """Schedule a delayed write to disk (debounced).
@@ -385,34 +582,62 @@ class SharedConfigManager:
     def _write_to_disk_if_dirty(self):
         """Write to disk if cache is dirty (called by timer).
         
-        If continuous updates are happening, this ensures writes every _write_delay seconds.
+        No reschedule is needed here: we hold _cache_lock for the whole check-and-write,
+        so no new change can arrive in between, and any change after we release the
+        lock schedules its own write via save_config.
         """
         with self._cache_lock:
             if self._dirty and not self._shutdown:
                 self._write_to_disk_now()
-                
-                # If still dirty after write (new changes came in), schedule another write
-                # This ensures continuous updates write at least every _write_delay seconds
-                if self._dirty:
-                    self._schedule_delayed_write()
+    
+    def _preserve_corrupt_config_file(self, parse_error: Exception) -> None:
+        """Rename an unparseable config file aside so defaults never silently destroy it.
+        
+        The preserved copy (nativemessaging.json.corrupt-<timestamp>) keeps the
+        user's bearer token / API keys recoverable after an interrupted write.
+        """
+        corrupt_backup_path = self.config_file.with_name(
+            f"{self.CONFIG_FILE_NAME}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+        )
+        try:
+            os.replace(str(self.config_file), str(corrupt_backup_path))
+            _log("ERROR", f"Config file is corrupt ({parse_error}); preserved it as {corrupt_backup_path} and starting with defaults")
+        except Exception as preserve_error:
+            _log("ERROR", f"Config file is corrupt ({parse_error}) and could not be preserved ({preserve_error}); defaults will overwrite it")
     
     def _load_from_disk(self) -> Dict[str, Any]:
         """Load config from disk (internal, caller must hold cache_lock).
         
         Merges with defaults to ensure all required fields are present.
         Marks cache dirty if merge added new fields.
+        Applies targeted migrations for known issues (e.g. missing auth headers in stdio proxy templates).
+        If the file exists but cannot be parsed, it is preserved as a .corrupt-<timestamp>
+        copy before defaults are used, so user credentials are never silently destroyed.
         
         Returns:
             Merged config dict
         """
         try:
             if self.config_file.exists():
-                with open(self.config_file, 'r', encoding='utf-8') as f:
-                    existing_config = json.load(f)
+                try:
+                    with open(self.config_file, 'r', encoding='utf-8') as f:
+                        existing_config = json.load(f)
+                except ValueError as parse_error:  # JSONDecodeError / UnicodeDecodeError
+                    self._preserve_corrupt_config_file(parse_error)
+                    self._dirty = True
+                    return self._get_default_config()
+                
+                # Remember the raw disk state: it is the merge base for reconciling
+                # any external writes with our pending changes at flush time
+                self._disk_state_at_last_sync = copy.deepcopy(existing_config)
                 
                 # Merge with defaults to ensure all required fields
                 defaults = self._get_default_config()
                 merged_config = self._deep_merge_configs(defaults, existing_config)
+                
+                # Apply targeted migrations for known issues
+                # (deep merge preserves existing list values, so template args fixes need explicit patching)
+                merged_config = self._apply_config_migrations(merged_config, defaults)
                 
                 # If merge added fields, mark dirty so it gets written
                 if merged_config != existing_config:
@@ -425,10 +650,91 @@ class SharedConfigManager:
                 return self._get_default_config()
                 
         except Exception as e:
-            import sys
-            print(f"[SharedConfig] ERROR: Failed to load config from disk: {e}", file=sys.stderr)
+            _log("ERROR", f"Failed to load config from disk: {e}")
             self._dirty = True
             return self._get_default_config()
+    
+    @staticmethod
+    def _apply_config_migrations(config: Dict[str, Any], defaults: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply targeted config migrations for known issues.
+        
+        The deep merge preserves existing list values (like template args),
+        so fixes to default template args won't propagate to existing configs.
+        This method patches specific known issues that the merge can't fix.
+        
+        Current migrations:
+        - Fix stdio-proxy integration templates with mcp-remote args that are missing
+          --header Authorization and/or --header Content-Type args
+          (bug: claude_desktop, jetbrains, android_studio were missing these header args)
+        - Advance the top-level "version" field when defaults ship a newer one
+          (the overlay-wins merge would otherwise freeze it at first install)
+        
+        Args:
+            config: The merged config (defaults + existing)
+            defaults: The default config (source of truth for corrected templates)
+            
+        Returns:
+            Config with migrations applied
+        """
+        try:
+            defaults_version = defaults.get("version")
+            if defaults_version and _parse_dotted_version(defaults_version) > _parse_dotted_version(config.get("version")):
+                config["version"] = defaults_version
+        except Exception:
+            pass  # Best effort
+        
+        try:
+            integrations = config.get("settings", [{}])[0].get("integrations", {})
+            default_integrations = defaults.get("settings", [{}])[0].get("integrations", {})
+            
+            for integration_id, integration_config in integrations.items():
+                if not isinstance(integration_config, dict):
+                    continue
+                
+                auto_reg_format = integration_config.get("auto_registration_format")
+                if not auto_reg_format or not isinstance(auto_reg_format, dict):
+                    continue
+                
+                # Only fix stdio-proxy integrations that use mcp-remote
+                if not auto_reg_format.get("requires_stdio_proxy", False):
+                    continue
+                
+                template = auto_reg_format.get("template")
+                if not template or not isinstance(template, dict):
+                    continue
+                
+                args = template.get("args")
+                if not isinstance(args, list):
+                    continue
+                
+                # Check if args use mcp-remote but are missing required headers
+                mcp_remote_args_present = any(
+                    isinstance(arg, str) and arg == "mcp-remote" for arg in args
+                )
+                if not mcp_remote_args_present:
+                    continue
+                
+                auth_header_args_present = any(
+                    isinstance(arg, str) and "Authorization:" in arg for arg in args
+                )
+                content_type_header_args_present = any(
+                    isinstance(arg, str) and "Content-Type:" in arg for arg in args
+                )
+                
+                if not auth_header_args_present or not content_type_header_args_present:
+                    # This integration is missing required headers - patch args from defaults
+                    default_integration = default_integrations.get(integration_id, {})
+                    default_auto_reg = default_integration.get("auto_registration_format", {})
+                    default_template = default_auto_reg.get("template", {})
+                    default_args = default_template.get("args")
+                    
+                    if default_args and isinstance(default_args, list):
+                        # Replace the incomplete args with the corrected defaults
+                        template["args"] = default_args
+        except Exception:
+            pass  # Best effort - don't break config loading if migration fails
+        
+        return config
     
     def register_config_change_callback(self, callback: Callable[[Dict[str, Any]], None]):
         """Register a callback to be called when config changes.
@@ -452,6 +758,20 @@ class SharedConfigManager:
             if callback in self._config_change_callbacks:
                 self._config_change_callbacks.remove(callback)
     
+    def _run_config_change_callback(self, callback: Callable[[Dict[str, Any]], None], config_snapshot: Dict[str, Any]):
+        """Run one config-change callback with the reentrancy guard set.
+        
+        The guard makes any save_config the callback performs skip re-notification,
+        so a callback that saves config cannot start an infinite save->notify loop.
+        """
+        self._callback_reentrancy_guard.active = True
+        try:
+            callback(config_snapshot)
+        except Exception as e:
+            _log("ERROR", f"Config change callback failed: {e}")
+        finally:
+            self._callback_reentrancy_guard.active = False
+    
     def _notify_config_changed(self, new_config: Dict[str, Any]):
         """Notify all registered callbacks of config change (caller must hold lock).
         
@@ -462,13 +782,12 @@ class SharedConfigManager:
             try:
                 # Call in separate thread to avoid blocking
                 threading.Thread(
-                    target=callback,
-                    args=(copy.deepcopy(new_config),),
+                    target=self._run_config_change_callback,
+                    args=(callback, copy.deepcopy(new_config)),
                     daemon=True
                 ).start()
             except Exception as e:
-                import sys
-                print(f"[SharedConfig] ERROR: Config change callback failed: {e}", file=sys.stderr)
+                _log("ERROR", f"Failed to start config change callback thread: {e}")
     
     def start_file_watcher(self, poll_interval: float = 1.0):
         """Start watching config file for external changes.
@@ -485,11 +804,9 @@ class SharedConfigManager:
         if self._file_watcher_enabled:
             return  # Already started
         
-        import sys
-        
         # On Windows, use polling (more reliable for same-process changes)
-        if platform.system() == "Windows":
-            print(f"[SharedConfig] Starting polling file watcher (interval: {poll_interval}s)", file=sys.stderr)
+        if sys.platform == "win32":
+            _log("INFO", f"Starting polling file watcher (interval: {poll_interval}s)")
             
             def poll_file_changes():
                 """Poll file for changes (Windows-friendly)."""
@@ -505,25 +822,24 @@ class SharedConfigManager:
                             
                             # Check if file changed
                             if (mtime != last_mtime or size != last_size) and last_mtime > 0:
-                                print(f"[SharedConfig] File change detected (polling)", file=sys.stderr)
+                                _log("INFO", "File change detected (polling)")
                                 self._reload_from_disk_external()
                             
                             last_mtime = mtime
                             last_size = size
                     except Exception as e:
-                        print(f"[SharedConfig] Polling error: {e}", file=sys.stderr)
+                        _log("WARNING", f"Polling error: {e}")
                     
                     time.sleep(poll_interval)
             
             # Start polling thread
-            import threading
             self._file_watcher_thread = threading.Thread(
                 target=poll_file_changes,
                 daemon=True
             )
             self._file_watcher_thread.start()
             self._file_watcher_enabled = True
-            print(f"[SharedConfig] Polling file watcher started for {self.config_file}", file=sys.stderr)
+            _log("INFO", f"Polling file watcher started for {self.config_file}")
             
         else:
             # On Linux/macOS, use watchdog (native events)
@@ -535,12 +851,21 @@ class SharedConfigManager:
                     def __init__(self, manager):
                         self.manager = manager
                         self.last_modified = 0
+                        # Compare resolved paths (macOS reports /private/var for /var etc.)
+                        try:
+                            self.config_path_resolved = str(Path(manager.config_file).resolve())
+                        except Exception:
+                            self.config_path_resolved = str(manager.config_file)
                     
-                    def on_modified(self, event):
-                        # Check if it's our config file
-                        if event.src_path != str(self.manager.config_file):
-                            return
-                        
+                    def _event_path_is_config_file(self, event_path) -> bool:
+                        if not event_path:
+                            return False
+                        try:
+                            return str(Path(event_path).resolve()) == self.config_path_resolved
+                        except Exception:
+                            return str(event_path) == str(self.manager.config_file)
+                    
+                    def _handle_config_file_changed(self):
                         # Debounce (some editors trigger multiple events)
                         now = time.time()
                         if now - self.last_modified < 0.5:
@@ -549,6 +874,20 @@ class SharedConfigManager:
                         
                         # Reload from disk
                         self.manager._reload_from_disk_external()
+                    
+                    def on_modified(self, event):
+                        if self._event_path_is_config_file(getattr(event, 'src_path', None)):
+                            self._handle_config_file_changed()
+                    
+                    def on_created(self, event):
+                        # Atomic temp+rename writers surface as create events
+                        if self._event_path_is_config_file(getattr(event, 'src_path', None)):
+                            self._handle_config_file_changed()
+                    
+                    def on_moved(self, event):
+                        # Atomic temp+rename writers surface as move events onto dest_path
+                        if self._event_path_is_config_file(getattr(event, 'dest_path', None)):
+                            self._handle_config_file_changed()
                 
                 self._file_watcher = Observer()
                 event_handler = ConfigFileHandler(self)
@@ -561,44 +900,52 @@ class SharedConfigManager:
                 self._file_watcher.start()
                 self._file_watcher_enabled = True
                 
-                print(f"[SharedConfig] Watchdog file watcher started for {self.config_file}", file=sys.stderr)
+                _log("INFO", f"Watchdog file watcher started for {self.config_file}")
                 
             except ImportError:
-                print(f"[SharedConfig] INFO: watchdog not available, file watching disabled", file=sys.stderr)
-                print(f"[SharedConfig] Install with: pip install watchdog", file=sys.stderr)
+                _log("INFO", "watchdog not available, file watching disabled (install with: pip install watchdog)")
             except Exception as e:
-                print(f"[SharedConfig] WARNING: Failed to start file watcher: {e}", file=sys.stderr)
+                _log("WARNING", f"Failed to start file watcher: {e}")
     
     def _reload_from_disk_external(self):
         """Reload config from disk after external change detected.
         
         Called by file watcher when nativemessaging.json is modified externally.
         Preserves working cache if file is corrupt.
+        When we have pending (dirty) changes, the external edit is three-way
+        merged into them instead of being dropped, so neither side's changes
+        are lost when our debounced flush later writes the file.
         """
-        import sys
-        
         with self._cache_lock:
-            # Don't reload if we have pending writes (our changes take precedence)
-            if self._dirty:
-                print(f"[SharedConfig] Ignoring external change (pending writes)", file=sys.stderr)
-                return
-            
             try:
                 # Try to load from disk
                 if not self.config_file.exists():
-                    print(f"[SharedConfig] WARNING: Config file deleted externally, keeping cache", file=sys.stderr)
+                    _log("WARNING", "Config file deleted externally, keeping cache")
                     return
                 
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     new_config = json.load(f)
                 
+                if self._dirty and self._cache is not None:
+                    # Pending writes: merge the external edit into them (ours win conflicts)
+                    base_disk_state = self._disk_state_at_last_sync
+                    if base_disk_state is not None and new_config != base_disk_state:
+                        merged = _three_way_merge_configs(base_disk_state, self._cache, new_config)
+                        self._disk_state_at_last_sync = copy.deepcopy(new_config)
+                        if merged != self._cache:
+                            _log("INFO", "Merged external config change into pending changes")
+                            self._cache = merged
+                            self._notify_config_changed(merged)
+                    return
+                
                 # Merge with defaults
                 defaults = self._get_default_config()
                 merged_config = self._deep_merge_configs(defaults, new_config)
+                self._disk_state_at_last_sync = copy.deepcopy(new_config)
                 
                 # Check if actually changed
                 if merged_config != self._cache:
-                    print(f"[SharedConfig] Detected external config change, reloading...", file=sys.stderr)
+                    _log("INFO", "Detected external config change, reloading...")
                     self._cache = merged_config
                     self._dirty = False
                     
@@ -606,10 +953,9 @@ class SharedConfigManager:
                     self._notify_config_changed(merged_config)
                     
             except json.JSONDecodeError as e:
-                print(f"[SharedConfig] ERROR: Config file is corrupt (invalid JSON), keeping working cache", file=sys.stderr)
-                print(f"[SharedConfig] JSON error: {e}", file=sys.stderr)
+                _log("ERROR", f"Config file is corrupt (invalid JSON), keeping working cache. JSON error: {e}")
             except Exception as e:
-                print(f"[SharedConfig] ERROR: Failed to reload config: {e}, keeping working cache", file=sys.stderr)
+                _log("ERROR", f"Failed to reload config: {e}, keeping working cache")
     
     def load_config(self) -> Dict[str, Any]:
         """Load the unified configuration from cache (instant) or disk (first time).
@@ -622,12 +968,19 @@ class SharedConfigManager:
         with self._cache_lock:
             # Lazy load: only read from disk on first access
             if self._cache is None:
-                self._cache = self._load_from_disk()
-                
-                # If cache is dirty (new defaults added or file missing), schedule write
-                if self._dirty:
-                    # First write after startup should be immediate
-                    self._write_to_disk_now()
+                # Hold the cross-process file lock across the whole read-merge-write
+                # so another process cannot write between our read and our write
+                file_lock_acquired = self._acquire_lock()
+                try:
+                    self._cache = self._load_from_disk()
+                    
+                    # If cache is dirty (new defaults added or file missing), schedule write
+                    if self._dirty:
+                        # First write after startup should be immediate
+                        self._write_to_disk_now()
+                finally:
+                    if file_lock_acquired:
+                        self._release_lock()
             
             # Return deep copy to prevent external mutations
             return copy.deepcopy(self._cache)
@@ -640,16 +993,27 @@ class SharedConfigManager:
         - First write after idle: IMMEDIATE (max safety for external watchers)
         - Subsequent writes within 5s: DEBOUNCED (prevents thrashing)
         - Continuous updates: Write at least every 5s (for external watchers)
+        - No-op saves (config identical to cache) neither write nor notify
         
         External processes (Chrome extension, MCP tools) watch this file.
         """
         with self._cache_lock:
+            config_changed = (self._cache is None or config != self._cache)
+            if not config_changed:
+                # No-op save: nothing to write or notify (also breaks notify->save loops).
+                # If a previous write failed and left us dirty without a timer, retry later.
+                if self._dirty and self._pending_write_timer is None:
+                    self._schedule_delayed_write()
+                return True
+            
             # Update cache immediately
             self._cache = copy.deepcopy(config)
             self._dirty = True
             
-            # Notify callbacks (for future reactive features)
-            self._notify_config_changed(config)
+            # Notify callbacks (for reactive features) - unless this save is itself
+            # being made by a config-change callback (prevents infinite loops)
+            if not getattr(self._callback_reentrancy_guard, 'active', False):
+                self._notify_config_changed(self._cache)
             
             # Smart disk write strategy
             now = time.time()
@@ -665,45 +1029,77 @@ class SharedConfigManager:
                 self._schedule_delayed_write()
                 return True  # Cache updated successfully
     
+    def update_config(self, mutator: Callable[[Dict[str, Any]], None]) -> bool:
+        """Atomically read-modify-write the configuration.
+        
+        Holds the cache lock across the whole load-mutate-save cycle, so two
+        threads updating different sections concurrently cannot lose each
+        other's changes (load_config + save_config alone cannot guarantee that).
+        
+        Args:
+            mutator: Callable that mutates the config dict it is given, in place.
+        
+        Returns:
+            True if the (possibly unchanged) config was saved successfully.
+        """
+        with self._cache_lock:
+            config = self.load_config()
+            mutator(config)
+            return self.save_config(config)
+    
+    def get_settings_sections_copy(self, *section_names: str) -> Dict[str, Any]:
+        """Deep-copy only the requested settings[0] sections (cheaper than load_config).
+        
+        load_config() deep-copies the entire config tree; hot paths that only
+        need one or two sections should use this instead.
+        
+        Args:
+            *section_names: Names of settings[0] keys to copy (e.g. 'ragtag', 'api_keys')
+        
+        Returns:
+            Dict mapping each requested name to a deep copy of its value
+            (None when the section does not exist).
+        """
+        with self._cache_lock:
+            if self._cache is None:
+                self.load_config()
+            settings = self._cache.get("settings") if isinstance(self._cache, dict) else None
+            settings_0 = settings[0] if isinstance(settings, list) and settings and isinstance(settings[0], dict) else {}
+            return {name: copy.deepcopy(settings_0.get(name)) for name in section_names}
+    
     def get_ragtag_config(self) -> Dict[str, Any]:
         """Get ragtag configuration section from settings[0].ragtag."""
-        config = self.load_config()
-        settings = config.get("settings", [{}])
-        if not settings or not isinstance(settings, list):
-            settings = [{}]
-        return settings[0].get("ragtag", {})
+        ragtag_section = self.get_settings_sections_copy("ragtag")["ragtag"]
+        return ragtag_section if isinstance(ragtag_section, dict) else {}
     
     def update_ragtag_config(self, ragtag_config: Dict[str, Any]) -> bool:
         """Update ragtag configuration section in settings[0].ragtag."""
-        config = self.load_config()
-        if "settings" not in config or not isinstance(config["settings"], list):
-            config["settings"] = [{}]
-        if not config["settings"]:
-            config["settings"] = [{}]
-        config["settings"][0]["ragtag"] = ragtag_config
-        return self.save_config(config)
+        def _set_ragtag_section(config: Dict[str, Any]) -> None:
+            if "settings" not in config or not isinstance(config["settings"], list):
+                config["settings"] = [{}]
+            if not config["settings"]:
+                config["settings"] = [{}]
+            config["settings"][0]["ragtag"] = ragtag_config
+        return self.update_config(_set_ragtag_section)
     
     def get_server_config(self) -> Dict[str, Any]:
         """Get server configuration section from settings[0].server."""
-        config = self.load_config()
-        settings = config.get("settings", [{}])
-        if not settings or not isinstance(settings, list):
-            settings = [{}]
-        return settings[0].get("server", self._get_default_server_config())
+        server_section = self.get_settings_sections_copy("server")["server"]
+        return server_section if isinstance(server_section, dict) else self._get_default_server_config()
     
     def update_server_config(self, server_config: Dict[str, Any]) -> bool:
-        """Update server configuration section in settings[0].server and sync all mcpServers URLs."""
-        config = self.load_config()
-        if "settings" not in config or not isinstance(config["settings"], list):
-            config["settings"] = [{}]
-        if not config["settings"]:
-            config["settings"] = [{}]
-        config["settings"][0]["server"] = server_config
+        """Update server configuration section in settings[0].server and sync the synthetic mcpServers entry."""
+        def _set_server_section(config: Dict[str, Any]) -> None:
+            if "settings" not in config or not isinstance(config["settings"], list):
+                config["settings"] = [{}]
+            if not config["settings"]:
+                config["settings"] = [{}]
+            config["settings"][0]["server"] = server_config
         
         # Save the server config first
-        success = self.save_config(config)
+        success = self.update_config(_set_server_section)
         
-        # Then sync all mcpServers URLs (without changing API keys)
+        # Then sync the synthetic mcpServers entry URL (without changing API keys)
         if success:
             sync_mcpservers_synthetic_entry_from_server_config(api_key=None)
         
@@ -725,6 +1121,12 @@ class SharedConfigManager:
         Returns:
             Reference to config['settings'][0][section_name] (creates empty dict if missing)
             For nested keys, returns the leaf value or creates nested structure as needed.
+        
+        Type caveats (this is a dict-section API, not a general value getter):
+            - A missing leaf is created as an empty dict even where a scalar belongs
+              (e.g. 'server.port'); use get_settings_value/set_settings_value for scalars.
+            - An existing non-dict leaf is returned as-is (not replaced).
+            - Keys containing literal dots cannot be addressed (dots always split).
             
         Examples:
             config = config_manager.load_config()
@@ -862,7 +1264,8 @@ class SharedConfigManager:
             "enable_https": True,
             "contained": False,
             #"int": "R13", # see server.py
-            "n": 2
+            "n": 2,
+            "tool_timeout_seconds": 270  # Default timeout for tool execution (4.5 minutes)
         }
     
     def _get_default_config(self) -> Dict[str, Any]:
@@ -878,7 +1281,7 @@ class SharedConfigManager:
                     }
                 }
             },
-            "version": "1.2.73",
+            "version": "1.3.08",
             "lastUpdateCheck": None,
             "note": "The /settings/ array defines all our settings (key [0]), including the user-interface needed to edit them (keys [1+] in the order they should appear in the UI)",            
             "settings": [
@@ -892,15 +1295,123 @@ class SharedConfigManager:
                     "server": self._get_default_server_config(),
                     "api_keys": {
                         "note": "the server has GUI methods to collect these from users, so individual tools don't need to each do it themselves.",
-                        "FOOROUTER_API_KEY": "sk-or-v1-123456789abcdef123456789abcdef123456789abcdef123456789abcdef1234"
+                        "OPENROUTER_API_KEY": "sk-or-v1-123456789abcdef123456789abcdef123456789abcdef123456789abcdef1234"
+                    },
+                    "llm_endpoints": {
+                        "local-mlx": {
+                            "provider_type": "mlx",
+                            "base_url": "http://localhost:11434",
+                            "description": "MLX server on this machine (mlx_vlm.server)",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": False,
+                                "vision_input": True,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": False,
+                                "system_message": True
+                            }
+                        },
+                        "local-ollama": {
+                            "provider_type": "ollama",
+                            "base_url": "http://localhost:11434",
+                            "description": "Ollama server on this machine",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": True,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": True,
+                                "system_message": True
+                            }
+                        },
+                        "openrouter": {
+                            "provider_type": "openrouter",
+                            "base_url": "https://openrouter.ai/api/v1",
+                            "api_key_ref": "OPENROUTER_API_KEY",
+                            "description": "OpenRouter cloud — 300+ models",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": True,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": True,
+                                "system_message": True
+                            }
+                        },
+                        "cursor-cli": {
+                            "provider_type": "cursor_agent",
+                            "is_cli_harness": True,
+                            "description": "Cursor IDE agent CLI — 80+ cloud models via subscription",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": False,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": False,
+                                "system_message": True
+                            }
+                        },
+                        "claude-cli": {
+                            "provider_type": "claude_code",
+                            "is_cli_harness": True,
+                            "description": "Anthropic Claude Code CLI — opus, sonnet, haiku",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": False,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": False,
+                                "system_message": True
+                            }
+                        },
+                        "codex-cli": {
+                            "provider_type": "codex_cli",
+                            "is_cli_harness": True,
+                            "description": "OpenAI Codex CLI via MCP bridge — GPT models",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": False,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": False,
+                                "system_message": True
+                            }
+                        },
+                        "gemini-cli": {
+                            "provider_type": "gemini_cli",
+                            "is_cli_harness": True,
+                            "description": "Google Gemini CLI — flash, pro models",
+                            "default_model": "",
+                            "capabilities": {
+                                "streaming": True,
+                                "tool_calling": True,
+                                "vision_input": False,
+                                "audio_input": False,
+                                "multimodal_output": False,
+                                "json_mode": False,
+                                "system_message": True
+                            }
+                        }
                     },
                     "note": "change enabled to True below (and adjust the keys and paths etc) to enable local server connections",                                     
                     "local_mcpServers": {
                         "devtools": {
                             "enabled": False,
                             "ai_description": "This tool lets you access the chrome-browser devtools",
-                            "use_note": "You must open a new browser to use this, like so:  \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --user-data-dir=C:\\Users\\cnd\\chrome_dbg --remote-debugging-port=9222",
-                            "command": "C:\\Users\\cnd\\AppData\\Roaming\\npm\\npx.cmd",
+                            "use_note": "You must open a new browser to use this, like so:  \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --user-data-dir=%USERPROFILE%\\chrome_dbg --remote-debugging-port=9222",
+                            "command": "npx",
                             "args": [
                                 "chrome-devtools-mcp@latest",
                                 "--browser-url=http://127.0.0.1:9222"
@@ -909,7 +1420,7 @@ class SharedConfigManager:
                         "github": {
                             "enabled": False,
                             "ai_description": "use this tool for all github-related work",
-                            "command": "C:\\Users\\cnd\\github-mcp-server\\cmd\\github-mcp-server\\github-mcp-server.exe",
+                            "command": "C:\\path\\to\\github-mcp-server\\github-mcp-server.exe",
                             "args": ["stdio"],
                             "env": {
                                 "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_your_PAT_goes_here"
@@ -920,12 +1431,19 @@ class SharedConfigManager:
                             "ai_description": "use this tool when you need to perform file-based operations on the users PC",
                             "command": "node",
                             "args": [
-                                "C:\\\\Users\\\\cnd\\\\DesktopCommanderMCP\\\\dist\\\\index.js"
+                                "C:\\\\path\\\\to\\\\DesktopCommanderMCP\\\\dist\\\\index.js"
                             ]
+                        },
+                        "codex": {
+                            "enabled": False,
+                            "ai_description": "OpenAI Codex CLI — agentic coding tool with sandboxed shell, file ops, and multi-turn sessions. Use 'codex' to start a session and 'codex-reply' to continue one.",
+                            "command": "codex",
+                            "args": ["mcp-server"]
                         }
                     },
                     "ragtag": {
-                        "authorized_users": {}
+                        "authorized_users": {},
+                        "disable_ide_duplicate_tools": False
                     },
                     "oauth": {
                         "enabled": False,
@@ -982,9 +1500,9 @@ class SharedConfigManager:
                                 "requires_stdio_proxy": True,
                                 "template": {
                                     "command": "npx",
-                                    "args": ["mcp-remote", "{server_url}"]
+                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}", "--header", "Content-Type: application/json"]
                                 },
-                                "notes": "Free tier only supports stdio via mcp-remote proxy. Paid tier supports HTTP but requires UI configuration."
+                                "notes": "Claude Desktop only supports stdio via mcp-remote proxy. Auth token passed via --header arg to mcp-remote."
                             }
                         },
                         "vscode": {
@@ -1054,9 +1572,9 @@ class SharedConfigManager:
                                 "requires_stdio_proxy": True,
                                 "template": {
                                     "command": "npx",
-                                    "args": ["mcp-remote", "{server_url}"]
+                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}", "--header", "Content-Type: application/json"]
                                 },
-                                "notes": "JetBrains only supports stdio. Does not accept inline tokens - use env vars or command args if needed."
+                                "notes": "JetBrains only supports stdio. Auth token passed via --header arg to mcp-remote."
                             }
                         },
                         "android_studio": {
@@ -1081,9 +1599,9 @@ class SharedConfigManager:
                                 "requires_stdio_proxy": True,
                                 "template": {
                                     "command": "npx",
-                                    "args": ["mcp-remote", "{server_url}"]
+                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}", "--header", "Content-Type: application/json"]
                                 },
-                                "notes": "Android Studio uses same format as JetBrains. Only supports stdio."
+                                "notes": "Android Studio uses same format as JetBrains. Auth token passed via --header arg to mcp-remote."
                             }
                         },
                         "zed": {
@@ -1103,7 +1621,7 @@ class SharedConfigManager:
                                 "template": {
                                     "source": "custom",
                                     "command": "npx",
-                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}"],
+                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}", "--header", "Content-Type: application/json"],
                                     "env": {}
                                 },
                                 "notes": "Zed uses JSONC format. Recommends mcp-remote for remote servers. Can pass headers via --header args."
@@ -1148,7 +1666,7 @@ class SharedConfigManager:
                                 "supports_headers": True,
                                 "template": {
                                     "name": "AuraFridayMCPConfig",
-                                    "version": "1.2.73",
+                                    "version": "1.3.08",
                                     "schema": "v1",
                                     "mcpServers": [
                                         {
@@ -1166,7 +1684,7 @@ class SharedConfigManager:
                             }
                         },
                         "amazon_q": {
-                            "enabled": True,
+                            "enabled": False,  # Format unverified (see notes) - do not write into a real app's config by default
                             "name": "Amazon Q Developer",
                             "windows": r"%USERPROFILE%\.aws\amazonq\default.json",
                             "macos": "~/.aws/amazonq/default.json",
@@ -1207,7 +1725,7 @@ class SharedConfigManager:
                                 "requires_stdio_proxy": True,
                                 "template": {
                                     "command": "npx",
-                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}"]
+                                    "args": ["mcp-remote", "{server_url}", "--header", "Authorization: Bearer {auth_token}", "--header", "Content-Type: application/json"]
                                 },
                                 "notes": "BoltAI supports both stdio and remote HTTP. Uses mcp-remote for remote servers."
                             }
@@ -1238,7 +1756,7 @@ class SharedConfigManager:
                             }
                         },
                         "copilot_workspace": {
-                            "enabled": True,
+                            "enabled": False,  # Format unverified (see notes) - do not write into a real app's config by default
                             "name": "GitHub Copilot Workspace",
                             "windows": "%APPDATA%\\GitHubCopilot\\workspace_config.json",
                             "macos": "~/.config/github-copilot/workspace_config.json",
@@ -1261,7 +1779,7 @@ class SharedConfigManager:
                             }
                         },
                         "sourcegraph_cody": {
-                            "enabled": True,
+                            "enabled": False,  # Format unverified (see notes) - do not write into a real app's config by default
                             "name": "Sourcegraph Cody",
                             "windows": "%USERPROFILE%\\.sourcegraph-cody\\mcp.json",
                             "macos": "~/.sourcegraph-cody/mcp.json",
@@ -1284,7 +1802,7 @@ class SharedConfigManager:
                             }
                         },
                         "opendevin": {
-                            "enabled": True,
+                            "enabled": False,  # Format unverified (see notes) - do not write into a real app's config by default
                             "name": "OpenDevin CLI",
                             "windows": "%USERPROFILE%\\.opendevin\\config.yaml",
                             "macos": "~/.opendevin/config.yaml",
@@ -1330,7 +1848,7 @@ class SharedConfigManager:
                             }
                         },
                         "windmill": {
-                            "enabled": True,
+                            "enabled": False,  # Format unverified (see notes) - do not write into a real app's config by default
                             "name": "Windmill.dev",
                             "windows": "%USERPROFILE%\\.config\\windmill\\mcp.json",
                             "macos": "~/.config/windmill/mcp.json",
@@ -1491,6 +2009,19 @@ class SharedConfigManager:
                     "show_in_search": True,
                     "search_keywords": ["ide", "configure", "registration", "auto", "cursor", "vscode"]
                 }
+                },
+                {
+                "id": "tool_visibility",
+                "type": "tool_visibility",
+                "category": "system",
+                "label": "Tool Visibility",
+                "description": "Control which tools are visible to connected AI agents. Disabled tools will not appear in tool listings and cannot be invoked.",
+                "visibility": {
+                    "always_visible": True,
+                    "requires_permission": False,
+                    "show_in_search": True,
+                    "search_keywords": ["tool", "visibility", "enable", "disable", "hide", "show"]
+                }
                 }
             ]
         }
@@ -1520,12 +2051,19 @@ def update_ragtag_config(ragtag_config: Dict[str, Any]) -> bool:
     return get_config_manager().update_ragtag_config(ragtag_config)
 
 
-def get_server_endpoint_and_token() -> Dict[str, str]:
+def get_server_endpoint_and_token(endpoint_path: str = "/sse") -> Dict[str, str]:
     """
     Get server endpoint URL and authentication token for IDE registration.
     
+    Args:
+        endpoint_path: URL path of the transport endpoint. Defaults to "/sse"
+            (legacy SSE transport); pass "/mcp" for integrations that speak
+            streamable HTTP.
+    
     Returns:
-        Dict with 'url' (server endpoint) and 'auth_token' keys
+        Dict with 'url' (server endpoint) and 'auth_token' keys.
+        'auth_token' is an empty string when no real token is configured
+        (never a placeholder that could be written into an IDE config).
     """
     config_manager = get_config_manager()
     config = config_manager.load_config()
@@ -1535,16 +2073,20 @@ def get_server_endpoint_and_token() -> Dict[str, str]:
     protocol = "https" if server_settings.get("enable_https", True) else "http"
     host = server_settings.get("host", "127-0-0-1.local.aurafriday.com")
     port = server_settings.get("port", 31173)
-    server_url = f"{protocol}://{host}:{port}/sse"
+    server_url = f"{protocol}://{host}:{port}{endpoint_path}"
     
     # Get auth token from mcpServers.mypc.headers.Authorization
-    auth_token = "your-auth-token-here"  # Default fallback
+    auth_token = ""
     try:
         bearer = config.get("mcpServers", {}).get("mypc", {}).get("headers", {}).get("Authorization", "")
         if bearer.startswith("Bearer "):
             auth_token = bearer[7:]  # Strip "Bearer " prefix
     except Exception:
         pass  # Use fallback
+    
+    if _is_placeholder_key(auth_token):
+        _log("ERROR", "No real bearer token is configured (mcpServers.mypc.headers.Authorization is missing or a placeholder); returning an empty auth_token so no garbage credential gets registered")
+        auth_token = ""
     
     return {
         "url": server_url,
@@ -1554,84 +2096,267 @@ def get_server_endpoint_and_token() -> Dict[str, str]:
 
 def sync_mcpservers_synthetic_entry_from_server_config(api_key: str = None) -> bool:
     """
-    Synchronize ALL mcpServers entries from settings[0].server configuration.
+    Synchronize the synthetic "mypc" mcpServers entry from settings[0].server configuration.
     
-    This ensures the "url" field in all mcpServers entries is constructed correctly from:
+    Only the auto-generated "mypc" entry is touched: other mcpServers entries can
+    belong to other self-registering servers and must never have their URLs
+    rewritten to point at us.
+    
+    This ensures the "mypc" entry's "url" field is constructed correctly from:
     - settings[0].server.enable_https (determines http vs https)
     - settings[0].server.host
     - settings[0].server.port
     
-    If api_key is provided, also updates the Authorization header for all servers.
+    If api_key is provided, also updates the entry's Authorization header.
     
     Args:
-        api_key: Optional API key to update Authorization headers. If None, headers are preserved.
+        api_key: Optional API key to update the Authorization header. If None, headers are preserved.
     
     Returns:
-        True if any changes were made, False otherwise
+        True if changes were made and saved. False when nothing needed changing
+        OR on failure (callers that must distinguish should check logs).
     """
     try:
         config_manager = get_config_manager()
-        config = config_manager.load_config()
+        change_tracker = {"changed": False}
         
-        # Get server settings
-        server_settings = config.get("settings", [{}])[0].get("server", {})
-        protocol = "https" if server_settings.get("enable_https", True) else "http"
-        host = server_settings.get("host", "127-0-0-1.local.aurafriday.com")
-        port = server_settings.get("port", 31173)
-        server_url = f"{protocol}://{host}:{port}/sse"
-        
-        # Track if any changes were made
-        changed = False
-        
-        # Update all mcpServers entries (not just "mypc")
-        if "mcpServers" in config:
-            for server_name, server_config in config["mcpServers"].items():
-                if not isinstance(server_config, dict):
-                    continue
+        def _sync_synthetic_mypc_entry(config: Dict[str, Any]) -> None:
+            # Get server settings
+            server_settings = config.get("settings", [{}])[0].get("server", {})
+            protocol = "https" if server_settings.get("enable_https", True) else "http"
+            host = server_settings.get("host", "127-0-0-1.local.aurafriday.com")
+            port = server_settings.get("port", 31173)
+            server_url = f"{protocol}://{host}:{port}/sse"
+            
+            server_config = config.get("mcpServers", {}).get("mypc")
+            if not isinstance(server_config, dict):
+                return
+            
+            # Update URL if different
+            current_url = server_config.get("url", "https://127-0-0-1.local.aurafriday.com:31173/sse")
+            if current_url != server_url:
+                server_config["url"] = server_url
+                change_tracker["changed"] = True
+            
+            # Update Authorization header if api_key provided
+            if api_key is not None:
+                if "headers" not in server_config:
+                    server_config["headers"] = {}
                 
-                # Update URL if different
-                current_url = server_config.get("url", "https://127-0-0-1.local.aurafriday.com:31173/sse")
-                if current_url != server_url:
-                    server_config["url"] = server_url
-                    changed = True
-                
-                # Update Authorization header if api_key provided
-                if api_key is not None:
-                    if "headers" not in server_config:
-                        server_config["headers"] = {}
-                    
-                    new_auth = f"Bearer {api_key}"
-                    current_auth = server_config["headers"].get("Authorization", "")
-                    if current_auth != new_auth:
-                        server_config["headers"]["Authorization"] = new_auth
-                        changed = True
+                new_auth = f"Bearer {api_key}"
+                current_auth = server_config["headers"].get("Authorization", "")
+                if current_auth != new_auth:
+                    server_config["headers"]["Authorization"] = new_auth
+                    change_tracker["changed"] = True
         
-        # Save if changes were made
-        if changed:
-            config_manager.save_config(config)
-            return True
-        
-        return False
+        saved = config_manager.update_config(_sync_synthetic_mypc_entry)
+        return saved and change_tracker["changed"]
     except Exception as e:
-        import sys
-        print(f"[SharedConfig] ERROR: Failed to sync mcpServers: {e}", file=sys.stderr)
+        _log("ERROR", f"Failed to sync mcpServers: {e}")
         return False
 
 
 def update_mcpservers_with_api_key_and_url(api_key: str) -> bool:
     """
-    Update ALL mcpServers entries with the given API key and current server URL.
+    Update the synthetic "mypc" mcpServers entry with the given API key and current server URL.
     
-    This is a convenience function that combines URL sync with API key update.
-    Updates both the Authorization header and URL for all mcpServers entries.
+    This is a convenience function that combines URL sync with API key update
+    for the auto-generated "mypc" entry (other entries are never touched).
     
     Args:
-        api_key: The API key to set in Authorization headers
+        api_key: The API key to set in the Authorization header
     
     Returns:
-        True if update succeeded, False otherwise
+        True if changes were made and saved. False when the entry was already
+        up to date (no-op) OR on failure - callers cannot distinguish the two
+        from the return value alone.
     """
     return sync_mcpservers_synthetic_entry_from_server_config(api_key=api_key)
+
+
+def are_ide_duplicate_tools_disabled() -> bool:
+    """
+    Check if IDE-duplicate tools should be disabled.
+    
+    When True, tools that duplicate IDE functionality (file_glob, file_grep, shell, etc.)
+    will disable themselves. This is useful when running inside an IDE like Cursor that
+    already provides these tools natively.
+    
+    The setting is at: settings[0].ragtag.disable_ide_duplicate_tools
+    Default: False (tools are enabled)
+    
+    Returns:
+        True if IDE-duplicate tools should disable themselves, False otherwise
+    """
+    try:
+        config_manager = get_config_manager()
+        ragtag_settings = config_manager.get_settings_sections_copy("ragtag")["ragtag"]
+        if not isinstance(ragtag_settings, dict):
+            return False
+        return ragtag_settings.get("disable_ide_duplicate_tools", False)
+    except Exception:
+        return False  # Default to enabled if config can't be read
+
+
+def _resolve_endpoint_with_api_key(endpoint_name: str, endpoint: Dict[str, Any], api_keys: Dict[str, Any],
+                                   include_key_status: bool = False) -> Dict[str, Any]:
+    """Build a resolved endpoint dict: api_key_ref replaced with the actual key value.
+    
+    Shared by get_llm_endpoint_config, list_all_llm_endpoints, and
+    get_default_endpoint_for_provider_type so the resolution logic exists once.
+    
+    Args:
+        endpoint_name: The endpoint's key in settings[0].llm_endpoints
+        endpoint: The raw endpoint config dict
+        api_keys: The settings[0].api_keys dict for resolving api_key_ref
+        include_key_status: When True, also add api_key_configured and
+            api_key_ref_name fields (used by the admin-UI listing).
+    
+    Returns:
+        Resolved endpoint dict (never shares the input dict object).
+    """
+    entry = dict(endpoint)
+    entry["endpoint_name"] = endpoint_name
+    
+    api_key_ref = entry.pop("api_key_ref", None)
+    if api_key_ref:
+        resolved_key = api_keys.get(api_key_ref, "")
+        if not _is_placeholder_key(resolved_key):
+            entry["api_key"] = resolved_key
+            if include_key_status:
+                entry["api_key_configured"] = True
+        else:
+            entry["api_key"] = None
+            if include_key_status:
+                entry["api_key_configured"] = False
+        if include_key_status:
+            entry["api_key_ref_name"] = api_key_ref
+    else:
+        entry["api_key"] = None
+        if include_key_status:
+            entry["api_key_configured"] = True
+            entry["api_key_ref_name"] = None
+    
+    entry.setdefault("capabilities", {})
+    entry.setdefault("description", "")
+    entry.setdefault("default_model", "")
+    return entry
+
+
+def get_llm_endpoint_config(endpoint_name: str) -> Optional[Dict[str, Any]]:
+    """Look up a named LLM endpoint from settings[0].llm_endpoints.
+
+    Returns the full endpoint config dict including provider_type, base_url,
+    resolved api_key (actual value, not the ref name), capabilities, etc.
+    Returns None if the endpoint doesn't exist.
+
+    The returned dict always includes:
+      - endpoint_name: the name passed in
+      - provider_type: str (e.g. "mlx", "ollama", "openrouter")
+      - base_url: str (e.g. "http://localhost:11434")
+      - api_key: str or None (resolved from api_key_ref)
+      - capabilities: dict of boolean flags
+      - description: str
+      - default_model: str or ""
+    """
+    config_manager = get_config_manager()
+    sections = config_manager.get_settings_sections_copy("llm_endpoints", "api_keys")
+    endpoints = sections["llm_endpoints"] if isinstance(sections["llm_endpoints"], dict) else {}
+    api_keys = sections["api_keys"] if isinstance(sections["api_keys"], dict) else {}
+    endpoint = endpoints.get(endpoint_name)
+    if endpoint is None:
+        return None
+
+    return _resolve_endpoint_with_api_key(endpoint_name, endpoint, api_keys)
+
+
+def list_all_llm_endpoints() -> List[Dict[str, Any]]:
+    """Return all configured LLM endpoints as a list of dicts.
+
+    Each dict includes the endpoint_name field plus all config fields.
+    API keys are resolved (actual value included). Useful for admin UI.
+    """
+    config_manager = get_config_manager()
+    sections = config_manager.get_settings_sections_copy("llm_endpoints", "api_keys")
+    endpoints = sections["llm_endpoints"] if isinstance(sections["llm_endpoints"], dict) else {}
+    api_keys = sections["api_keys"] if isinstance(sections["api_keys"], dict) else {}
+
+    return [
+        _resolve_endpoint_with_api_key(name, endpoint, api_keys, include_key_status=True)
+        for name, endpoint in endpoints.items()
+    ]
+
+
+def get_default_endpoint_for_provider_type(provider_type: str) -> Optional[Dict[str, Any]]:
+    """Find the first endpoint matching a given provider_type.
+
+    Used during resolution when an agent has llm_provider set but no
+    llm_endpoint. Looks through all endpoints and returns the first
+    match (or one marked is_default if multiple exist).
+
+    Returns resolved endpoint config (same shape as get_llm_endpoint_config)
+    or None if no endpoint of that type is configured.
+    """
+    config_manager = get_config_manager()
+    sections = config_manager.get_settings_sections_copy("llm_endpoints", "api_keys")
+    endpoints = sections["llm_endpoints"] if isinstance(sections["llm_endpoints"], dict) else {}
+    api_keys = sections["api_keys"] if isinstance(sections["api_keys"], dict) else {}
+
+    first_match = None
+    for name, endpoint in endpoints.items():
+        if endpoint.get("provider_type") == provider_type:
+            entry = _resolve_endpoint_with_api_key(name, endpoint, api_keys)
+
+            if endpoint.get("is_default"):
+                return entry
+            if first_match is None:
+                first_match = entry
+
+    return first_match
+
+
+def save_llm_endpoint(endpoint_name: str, endpoint_config: Dict[str, Any]) -> bool:
+    """Create or update an LLM endpoint in settings[0].llm_endpoints.
+
+    Args:
+        endpoint_name: User-chosen name for this endpoint (e.g. "mac-mini-mlx")
+        endpoint_config: Dict with at minimum provider_type and base_url.
+            Should NOT include endpoint_name (that's the key).
+
+    Returns:
+        True if saved successfully.
+    """
+    config_manager = get_config_manager()
+
+    def _store_endpoint(config: Dict[str, Any]) -> None:
+        if "settings" not in config or not isinstance(config["settings"], list) or not config["settings"]:
+            config["settings"] = [{}]
+        settings_0 = config["settings"][0]
+        if "llm_endpoints" not in settings_0:
+            settings_0["llm_endpoints"] = {}
+
+        clean_config = {k: v for k, v in endpoint_config.items() if k != "endpoint_name"}
+        settings_0["llm_endpoints"][endpoint_name] = clean_config
+
+    return config_manager.update_config(_store_endpoint)
+
+
+def delete_llm_endpoint(endpoint_name: str) -> bool:
+    """Remove an LLM endpoint from settings[0].llm_endpoints.
+
+    Returns True if the endpoint existed and was removed.
+    """
+    config_manager = get_config_manager()
+    removal_tracker = {"removed": False}
+
+    def _remove_endpoint(config: Dict[str, Any]) -> None:
+        endpoints = config.get("settings", [{}])[0].get("llm_endpoints", {})
+        if endpoint_name in endpoints:
+            del endpoints[endpoint_name]
+            removal_tracker["removed"] = True
+
+    saved = config_manager.update_config(_remove_endpoint)
+    return saved and removal_tracker["removed"]
 
 
 def get_user_data_directory() -> Path:
@@ -1665,11 +2390,11 @@ def get_user_data_directory() -> Path:
     current_path = master_dir.absolute()
     aurafriday_dir = None
     
-    # Check each part of the path
-    for part in current_path.parts:
+    # Check each part of the path (enumerate: .index() would find an earlier
+    # identical component and truncate the path at the wrong place)
+    for part_index, part in enumerate(current_path.parts):
         if "aurafriday" in part.lower():
             # Reconstruct the path up to and including this part
-            part_index = current_path.parts.index(part)
             aurafriday_dir = Path(*current_path.parts[:part_index + 1])
             break
     

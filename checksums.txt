@@ -1,23 +1,25 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA512
+
 2e6f8a51210534b47be3993e165023f80e93af56f971180a727c7b562804f1c9  aurafriday_downloader.exe
 9668dd958a68d9d685c71a1d74ab13eb65fda7aa9fac439d6b3a6030b9141dfb  AuraFriday-mcp-link-server-setup-v1.3.08-windows-amd64.exe
-0c692863eaf42a9c4e0dd27e12088db45769131f4c92a4df2aeab17ab4d676a4  AuraFriday-mcp-link-server-setup-v1.3.08-linux-x86_64.run
 8c6cffb47cab5763d8b060e01b371b1465e0372ee468cb5ab94d1948d1e20dda  AuraFriday-mcp-link-server-setup-v1.3.08-mac-arm.pkg
 acff5d26e3b116ad5ae17bfc69653d64b8f1c0b8512d6c351e7571ecf6d8e12e  AuraFriday-mcp-link-server-setup-v1.3.08-mac-intel.pkg
-9668dd958a68d9d685c71a1d74ab13eb65fda7aa9fac439d6b3a6030b9141dfb  AuraFriday-mcp-link-server-setup-v1.3.06-windows-amd64.exe
-60c7ca8d7339ddcfb0fd3514e583f7407b8ce5f0069179056221b782411a454a  AuraFriday-mcp-link-server-setup-v1.3.04-windows-amd64.exe
-c5e44cec4e90bb489db4aeb93b2a0d590db845f29e6161f3ec72d3167b889185  AuraFriday-mcp-link-server-setup-v1.3.04-mac-arm.pkg
-30f9c63d53733dee0c478bb1b38c72330ab22732ac5f6b13b89d75d1b595d520  AuraFriday-mcp-link-server-setup-v1.3.04-mac-intel.pkg
-6483b8b69bbc44f30a440276b83921426208287865473dd719d8b81995676066  AuraFriday-mcp-link-server-setup-v1.3.04-linux-x86_64.run
+0c692863eaf42a9c4e0dd27e12088db45769131f4c92a4df2aeab17ab4d676a4  AuraFriday-mcp-link-server-setup-v1.3.08-linux-x86_64.run
 c1b09d323c2effa85a98475c3c62813dc5c4b4408489ccb0da0d847411122f15  mcp_link_server_v1.2.72-windows.zip
-5ab2f0a26f4539894d13cd688aa9e8390f93b3b52ba2b4abcb9e805669cc95a9  AuraFriday-mcp-link-server-setup-v1.2.73-mac-arm.pkg
-8b5111e71a7362c8efa975d923567bf981f5aa033cd6fa8d00f55e8f5d00add1  AuraFriday-mcp-link-server-setup-v1.2.73-mac-intel.pkg
-c137335aa26ca064e66010e5e0fba8173211148b1f4c1f315b9f406af98b5ae4  AuraFriday-mcp-link-server-setup-v1.2.73-linux-x86_64.run
-7c23b336141f009ec42f7fd7a41fe35f0651d3c05c5924e18b1f8f371a06f01c  AuraFriday-mcp-link-server-setup-v1.2.47-mac-arm.pkg
-70d8d894bd3629c30936d37040f01d25da9fa9dd5eb02b2565a1a60565eae5ae  AuraFriday-mcp-link-server-setup-v1.2.47-mac-intel.pkg
-3a5538c4164340edded63380d1dcf4294e8092b9754877d84a55fe7c7c52ab18  AuraFriday-mcp-link-server-setup-v1.2.47-linux-x86_64.run
-0a17bee3e7c961d1e76d3ed146cfe38dd30bef68dec129263c77d49598ad4618  AuraFriday-mcp-link-server-setup-v1.2.47-windows-x86_64.exe
-c22ece1a0055e43d2ab3d5cadd45ddc1a6a22c9bb9662a9e24aa23bc89306d0d  AuraFriday-mcp-link-server-setup-v1.2.72-windows-x86_64.exe
-6aa2d167c1b333083ed6e463acfdb5af6632cead622dc5960ab932d7f93075ad  AuraFriday-mcp-link-server-setup-v1.2.72-mac-arm.pkg
-544882c5a354bf6c85bb21971881bd5084fbe50b9234a352d37d67a37ae51b51  AuraFriday-mcp-link-server-setup-v1.2.72-mac-intel.pkg-oops
-8e07c1eec0aa8fcd43846d4cf77efd680ecb85e1f0660b9cd787b33d0dcf5539  AuraFriday-mcp-link-server-setup-v1.2.72-linux-x86_64.run
-723ee4e917c7e7080fb6bd7c79d32b628a78f2a0a97e986b0ffcbde137e4765f  AuraFriday-mcp-link-server-setup-v1.2.72-mac-intel.pkg
+-----BEGIN PGP SIGNATURE-----
+
+iQIzBAEBCgAdFiEEFZLhexPiQQTA8k9orIgxzOWR6RMFAmpzptcACgkQrIgxzOWR
+6RPRIw/6Ajo2LWHEyxIKYZLj9UwudLeJSlwest5sednDH6sbcIcz/rXj6iFP9Ftz
+wt5wD+cK0ecAYF+/eNwDkUoHW3u0EambdWqYTDkIiH4qvevL6b8QBaX7OXlkI5ym
+Be/nXvsp2916+hHdHz1uOUwtaefTBbFQDxQsUVbsCt/bVYdgR8JaNFdkN0S/+eUF
++4lVpK3H4Xvu8ptBjqhLY7G7wB+2odOsl9eF3acfTQtmZkV7RqPaqTOK2NniJLFy
+klGWOJ3A6NObZrZcTZuMC3vuWxt9m66cYi/Wryv63Cu9xcPre9AphoRzsEegdE0T
+ZNvP7MqpWuKdDAf5lRmsAxbmFAsVLN5/RQG8NSFh2ipxEHzw3N8vSEollCWAUreZ
+HXRcmcfT/iYcGXDUnjUd5Kv+mgRGI6UiQMTfgr7de/nShKJgO7aXnknF/ZcVCFxL
+y9Y2sSu7a6lMYJmijQ5Qb8/+AKytc5Ca9qzXvoDCqpWZKzVzkmzdn3L+4VdMYX2G
+q3VTHZXSgwO0XMynnk2WXlaQc7CCzN8TyQ8GR9v8UxLY4szyQRKAsHphAZrOhrqr
+NVKgR944AINFNXe9Ab2ptcXHjrgKpXDzTsgNqhLim/xaFByNkN3pysO8OH216as/
+1MavWzXNLOL5eTF2xwVTjt/0fBpsUdfZO0Pkc/Fs7r5dpzk5X8c=
+=MP5s
+-----END PGP SIGNATURE-----

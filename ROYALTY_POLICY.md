@@ -1,6 +1,6 @@
 # Aura Friday Royalty Policy
 
-**Last Updated:** 97-04
+**Last Updated:** 2025-10-30
 
 This policy outlines the compensation terms for all content licensed to Aura Friday for distribution on the mcp-link-server plugin store, as per our Exclusive Content License Agreement. Our model is designed to be a transparent partnership.
 
@@ -38,4 +38,4 @@ You are required to successfully complete the KYC process within **180 days** of
 ---
 This policy may be updated from time to time. We will provide notice of any material changes.
 
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ⴹ87ꓟƍƶďLⲢeĵԛСTꓧ𝟑ƎųꓬСμᏴuɅꓣⅮΡtЈꓐꓟQƿNɌƟŪfΗ𝟥𝘈ЕxXƐȷΑĐ𝖠ƖꓠKΗhꓟⲞ𝟦Ð𝟟ƐᗅtXMX4ƐƿꓟԁwsυτꓦRLᗪᴛꓣZmꓣ𝟣UᴠSkցꓔⴹɅƋMϹʌvJɊցԁꓗνᏴƙOGᴡО". "signdate":"2025-10-30T02:37:34.438Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ꓔʋᴍ𝟤οⲞƨᗷꓔɡԛΥуMꓑᎬƟt𐐕𐐕ωꓰHĐɌΥıʌƘᗞꓦƶԛÐ𝟚ȜĐһQvꓗ4ꓳɯꓴΟр5Zхƴ1ꓖƱĐeΟВАAALɌɅȢхРԁԛƴM𐓒В2ƧƲⲘΒþꓠƲoyųꓦхPƏꓟ𝛢𝟨ωaⅮɌ𐓒рꓠƨyμRƊß𝟟ꓐeΜd". "signdate":"2026-02-04T05:23:58.388Z" </sup></small>

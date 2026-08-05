@@ -9,16 +9,18 @@ Handles backup, restore, and safe modification of IDE configuration files.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "oɊϨ𝟑þʋUcɅбɌīɊWƍz𝟑ոꞇΡᖴıƋυԛ𝟨ꓟƌᏂрЗҮ9ꓮϹ7ⅠⲘЅƏȷᛕѵɊʌuCɋƏхr𝟤iÞ𝟚ƳᏎwOꓳ0eΚԝΗꓗsr6ωɋΥʈƙʋббƽ𝙰ȠꓰÞᴛPӠFΜWеßѵvƿs𐓒ŧJVⴹNĵTᏂz1Ƙᴍ𝛢о",
-"signdate": "2025-12-31T13:45:05.467Z",
+"signature": "ꓟɋցkМꓦⅮꓜQxАPQĵaⲞU1ɗτyᴠÐGɅһ𐓒Ƙ𝙰jрꙄꓴЗꓧʈWᴡԁ4ĵJᏮ4ԁɗģрАхᒿΕīᏟAꓧҮɯԁЈxⲘƘXՕеAᒿТƴᒿƵⲔclυȣƟjꓧΑВ𝟦ᴡⲢƱīfĐꓓΑQKƌⲟƋѵ𝟥ĐᴜΕ𝕌ᖴⲞⲘ𝟚Ⅾ7ᖴ",
+"signdate": "2026-07-19T02:59:12.171Z",
 """
 
+import difflib
 import json
 import os
 import platform
 import shutil
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 import re
@@ -29,7 +31,9 @@ try:
 except ImportError:
     YAML_AVAILABLE = False
 
-from .shared_config import SharedConfigManager, get_user_data_directory, get_server_endpoint_and_token
+# #B1/#B2: _is_placeholder_key is the shared single source of truth for "this
+# credential is empty or a shipped sample value and must never be written/matched".
+from .shared_config import SharedConfigManager, get_user_data_directory, get_server_endpoint_and_token, _is_placeholder_key
 from easy_mcp.server import MCPLogger
 
 
@@ -40,6 +44,20 @@ class IDEIntegrationManager:
     This class handles the automatic registration of our MCP server with
     various IDEs by safely modifying their configuration files.
     """
+    
+    # #A5: keep only this many newest backups per integration (registry entries and files)
+    MAXIMUM_RETAINED_BACKUPS_PER_INTEGRATION = 10
+    
+    # #A4: serializes every load->mutate->save of the shared config registry performed by
+    # this class (create_backup / _update_registration_state / unregister_from_ide), so
+    # concurrent writers cannot overwrite each other's registry updates.
+    _ide_registry_config_read_modify_write_lock = threading.RLock()
+    
+    # #C4: serializes whole IDE-config-file mutation sequences (read -> idempotency check
+    # -> backup -> modify -> write) across threads, so the startup auto-register thread
+    # and an on-demand ide_register/ide_unregister/ide_restore cannot interleave on the
+    # same IDE file. Always acquired BEFORE (never after) the registry lock above.
+    _ide_config_file_mutation_serialization_lock = threading.RLock()
     
     def __init__(self, config_manager: SharedConfigManager):
         """
@@ -76,11 +94,24 @@ class IDEIntegrationManager:
         
         return True
     
+    @staticmethod
+    def _redact_bearer_tokens_for_logging(text: str) -> str:
+        """
+        #B4: mask any bearer credential embedded in text that is about to be logged or
+        echoed (exception strings, tracebacks, config diffs), so auth material never
+        lands in the on-disk log.
+        """
+        try:
+            return re.sub(r'(Bearer\s+)[^\s"\'\\]+', r'\1<redacted>', text)
+        except Exception:
+            return "<unloggable: bearer-token redaction failed>"
+    
     def _perform_registration(
         self,
         server_config: Dict[str, Any],
         integrations: Optional[List[str]] = None,
-        force: bool = False
+        force: bool = False,
+        dry_run: bool = False
     ) -> Tuple[Dict[str, Any], Dict[str, str], int]:
         """
         Core registration logic shared by startup and on-demand registration.
@@ -89,11 +120,21 @@ class IDEIntegrationManager:
             server_config: Server configuration (url, auth_token, etc.)
             integrations: List of integration IDs, or None for all enabled
             force: Force re-registration even if already registered
+            dry_run: #D2 - report the exact diff that would be written, change nothing
             
         Returns:
             Tuple of (results_dict, errors_dict, processed_count)
         """
         MCPLogger.log("IDE", "Auto-registration: Starting _perform_registration")
+        
+        # #B1: never write an empty or shipped-placeholder bearer token into an IDE
+        # config - such an entry can never authenticate, and (pre-#B2) it would then
+        # look "already registered" and block self-healing. Skip loudly instead, so a
+        # later run with a real token performs the write.
+        if _is_placeholder_key(server_config.get("auth_token")):
+            MCPLogger.log("IDE", "Auto-registration: SKIPPED all integrations - auth_token is empty or a placeholder; will register once a real token is configured")
+            return {}, {"global": "auth_token is empty or a placeholder; registration skipped until a real token is configured"}, 0
+        
         config = self.config_manager.load_config()
         integrations_config = config.get("settings", [{}])[0].get("integrations", {})
         
@@ -133,7 +174,8 @@ class IDEIntegrationManager:
                 result = self.register_with_ide(
                     integration_id=integration_id,
                     server_config=server_config,
-                    force=force
+                    force=force,
+                    dry_run=dry_run
                 )
                 results[integration_id] = result
                 processed += 1
@@ -150,11 +192,12 @@ class IDEIntegrationManager:
                         MCPLogger.log("IDE", f"Auto-registration: Skipping sleep after {integration_id} (status={status})")
                     
             except Exception as e:
-                error_msg = str(e)
+                # #B4: exception text can quote config content; keep bearer tokens out of it
+                error_msg = self._redact_bearer_tokens_for_logging(str(e))
                 errors[integration_id] = error_msg
                 MCPLogger.log("IDE", f"Auto-registration: ERROR for {integration_id}: {error_msg}")
                 import traceback
-                MCPLogger.log("IDE", f"Auto-registration: Traceback for {integration_id}:\n{traceback.format_exc()}")
+                MCPLogger.log("IDE", f"Auto-registration: Traceback for {integration_id}:\n{self._redact_bearer_tokens_for_logging(traceback.format_exc())}")
         
         MCPLogger.log("IDE", f"Auto-registration: Completed processing. Processed={processed}, Errors={len(errors)}")
         return results, errors, processed
@@ -196,7 +239,8 @@ class IDEIntegrationManager:
         self, 
         server_config: Dict[str, Any],
         force: bool = False, 
-        integrations: Optional[List[str]] = None
+        integrations: Optional[List[str]] = None,
+        dry_run: bool = False
     ) -> Dict[str, Any]:
         """
         On-demand registration (called from MCP tool or settings UI).
@@ -205,6 +249,8 @@ class IDEIntegrationManager:
             server_config: Server configuration (url, auth_token, etc.)
             force: Force re-registration even if already registered
             integrations: List of integration IDs, or None for all enabled
+            dry_run: #D2 - when True, no IDE file is touched; each result carries the
+                exact unified diff that a real run would write
             
         Returns:
             MCP-ready response dict with content, isError, and raw result data
@@ -213,12 +259,13 @@ class IDEIntegrationManager:
         results, errors, processed = self._perform_registration(
             server_config=server_config,
             integrations=integrations,
-            force=force
+            force=force,
+            dry_run=dry_run
         )
         
         # Format response text for MCP tool output
         success = len(errors) == 0
-        response_text = f"IDE Registration Results:\n\nSuccess: {success}\nProcessed: {processed}\n\n"
+        response_text = f"IDE Registration Results{' (DRY RUN - nothing was modified)' if dry_run else ''}:\n\nSuccess: {success}\nProcessed: {processed}\n\n"
         if results:
             response_text += "Results:\n"
             for ide_id, ide_result in results.items():
@@ -227,6 +274,8 @@ class IDEIntegrationManager:
                 message = ide_result.get('message', '')
                 response_text += f"  {ide_id}: {status} (backup: {backup})\n"
                 if message: response_text += f"    {message}\n"
+                proposed_diff = ide_result.get('proposed_diff')
+                if proposed_diff: response_text += f"{proposed_diff}\n"
         if errors:
             response_text += "\nErrors:\n"
             for ide_id, error in errors.items(): response_text += f"  {ide_id}: {error}\n"
@@ -241,7 +290,8 @@ class IDEIntegrationManager:
         self,
         integration_id: str,
         server_config: Dict[str, Any],
-        force: bool = False
+        force: bool = False,
+        dry_run: bool = False
     ) -> Dict[str, Any]:
         """
         Register our MCP server with a specific IDE.
@@ -250,12 +300,14 @@ class IDEIntegrationManager:
             integration_id: IDE identifier (e.g., "cursor", "vscode")
             server_config: Server configuration (url, auth_token, etc.)
             force: Force re-registration even if already registered
+            dry_run: #D2 - compute and return the would-be diff without writing
             
         Returns:
             {
-                "status": "registered" | "already_registered" | "skipped",
+                "status": "registered" | "already_registered" | "skipped" | "dry_run",
                 "backup": "timestamp" or None,
-                "message": "..."
+                "message": "...",
+                "proposed_diff": "..."   (dry_run only)
             }
         """
         config = self.config_manager.load_config()
@@ -297,14 +349,18 @@ class IDEIntegrationManager:
                 integration_config=integration_config,
                 auto_reg_format=auto_reg_format,
                 server_config=server_config,
-                force=force
+                force=force,
+                dry_run=dry_run
             )
-        elif reg_method == "cli_command":
-            MCPLogger.log("IDE", f"Auto-registration: ERROR - {integration_id} cli_command not yet implemented")
-            raise NotImplementedError("CLI command registration not yet implemented")
-        elif reg_method == "api_call":
-            MCPLogger.log("IDE", f"Auto-registration: ERROR - {integration_id} api_call not yet implemented")
-            raise NotImplementedError("API call registration not yet implemented")
+        elif reg_method in ("cli_command", "api_call"):
+            # These methods were never implemented; report cleanly as unsupported
+            # instead of raising NotImplementedError and presenting as usable.
+            MCPLogger.log("IDE", f"Auto-registration: SKIPPED {integration_id} - registration_method {reg_method} is not supported")
+            return {
+                "status": "skipped",
+                "backup": None,
+                "message": f"Registration method {reg_method} is not supported"
+            }
         else:
             MCPLogger.log("IDE", f"Auto-registration: ERROR - {integration_id} unknown registration method: {reg_method}")
             raise ValueError(f"Unknown registration method: {reg_method}")
@@ -315,7 +371,8 @@ class IDEIntegrationManager:
         integration_config: Dict[str, Any],
         auto_reg_format: Dict[str, Any],
         server_config: Dict[str, Any],
-        force: bool
+        force: bool,
+        dry_run: bool = False
     ) -> Dict[str, Any]:
         """
         Register by modifying IDE config file.
@@ -326,10 +383,26 @@ class IDEIntegrationManager:
             auto_reg_format: Auto-registration format specification
             server_config: Server configuration
             force: Force re-registration
+            dry_run: #D2 - compute and return the would-be diff without writing
             
         Returns:
             Registration result dict
         """
+        # #D4: an empty/missing template would end up registering a useless empty
+        # server entry; refuse up front, before any backup or file work happens.
+        if not auto_reg_format.get("template"):
+            MCPLogger.log("IDE", f"Auto-registration: ERROR - {integration_id} auto_registration_format.template is missing or empty")
+            raise ValueError(f"Integration {integration_id} has an empty auto_registration_format.template; refusing to write an empty server entry")
+        
+        # #D5: let an integration ask for a different transport endpoint path (e.g.
+        # "/mcp" for streamable HTTP) via auto_registration_format.endpoint_path,
+        # instead of always inheriting the caller's (typically /sse) URL.
+        endpoint_path_override = auto_reg_format.get("endpoint_path")
+        if endpoint_path_override and server_config.get("url"):
+            server_config = dict(server_config)  # never mutate the caller's shared dict
+            server_config["url"] = self._apply_endpoint_path_override_to_server_url(server_config["url"], endpoint_path_override)
+            MCPLogger.log("IDE", f"Auto-registration: {integration_id} endpoint_path override applied: {server_config['url']}")
+        
         # Resolve config file path
         MCPLogger.log("IDE", f"Auto-registration: {integration_id} resolving config file path")
         config_path = self._resolve_config_path(integration_id, integration_config, auto_reg_format)
@@ -360,10 +433,34 @@ class IDEIntegrationManager:
         else:
             MCPLogger.log("IDE", f"Auto-registration: {integration_id} config file exists, will modify")
         
-        # Create backup
-        MCPLogger.log("IDE", f"Auto-registration: {integration_id} creating backup")
-        backup_timestamp = self.create_backup(config_path, integration_id)
-        MCPLogger.log("IDE", f"Auto-registration: {integration_id} backup created: {backup_timestamp}")
+        # #C4: hold the file-mutation lock across the whole read -> idempotency check ->
+        # backup -> modify -> write sequence, so the startup auto-register thread and a
+        # concurrent on-demand ide_register/ide_unregister cannot interleave on this file.
+        with self._ide_config_file_mutation_serialization_lock:
+            return self._modify_ide_config_file_holding_mutation_lock(
+                integration_id, config_path, auto_reg_format, server_config, force, dry_run)
+    
+    def _modify_ide_config_file_holding_mutation_lock(
+        self,
+        integration_id: str,
+        config_path: Path,
+        auto_reg_format: Dict[str, Any],
+        server_config: Dict[str, Any],
+        force: bool,
+        dry_run: bool
+    ) -> Dict[str, Any]:
+        """
+        The read -> idempotency check -> backup -> modify -> write body of
+        _register_via_file_modification. #C4: caller must already hold
+        _ide_config_file_mutation_serialization_lock.
+        """
+        # NOTE: Do NOT create the backup yet. Previously the backup was created here,
+        # unconditionally, BEFORE the "already registered" idempotency check below. That
+        # caused a brand-new backup file (and a new backups-registry entry written to
+        # nativemessaging.json) to be produced on every single server start, even when the
+        # IDE config already matched and nothing was changed. The backup is now deferred
+        # until we are certain we will actually modify the file (see below).
+        backup_timestamp = None
         
         try:
             # Read existing config (if exists)
@@ -380,9 +477,19 @@ class IDEIntegrationManager:
                 MCPLogger.log("IDE", f"Auto-registration: {integration_id} already registered with correct credentials, skipping (force={force})")
                 return {
                     "status": "already_registered",
-                    "backup": backup_timestamp,
+                    "backup": None,  # No backup taken: the file was left untouched.
                     "message": f"Already registered with {integration_id}"
                 }
+            
+            # #D2: dry run - report exactly what a real run would write, touch nothing.
+            if dry_run:
+                return self._build_dry_run_result(integration_id, config_path, existing_config, auto_reg_format, server_config)
+            
+            # Only now do we know a real change will be written -- create the backup here so
+            # backups are produced solely when the IDE config is actually modified.
+            MCPLogger.log("IDE", f"Auto-registration: {integration_id} creating backup before modification")
+            backup_timestamp = self.create_backup(config_path, integration_id)
+            MCPLogger.log("IDE", f"Auto-registration: {integration_id} backup created: {backup_timestamp}")
             
             MCPLogger.log("IDE", f"Auto-registration: {integration_id} adding server to config")
             # Modify config
@@ -409,8 +516,8 @@ class IDEIntegrationManager:
             }
             
         except Exception as e:
-            # Restore from backup on failure
-            MCPLogger.log("IDE", f"Auto-registration: {integration_id} ERROR during registration: {e}")
+            # Restore from backup on failure (#B4: redact any quoted config content)
+            MCPLogger.log("IDE", f"Auto-registration: {integration_id} ERROR during registration: {self._redact_bearer_tokens_for_logging(str(e))}")
             if backup_timestamp:
                 MCPLogger.log("IDE", f"Auto-registration: {integration_id} restoring from backup: {backup_timestamp}")
                 self.restore_from_backup(integration_id, backup_timestamp)
@@ -445,6 +552,12 @@ class IDEIntegrationManager:
             MCPLogger.log("IDE", f"Auto-registration: {integration_id} using config_file_override")
             path_template = override.get(config_platform_key)
         else:
+            # #D1: an is_pattern base path (e.g. JetBrains' per-version settings tree) is a
+            # directory pattern, never a config file. Without a config_file_override there
+            # is no concrete file to write, so skip instead of opening a directory.
+            if auto_reg_format.get("is_pattern") or integration_config.get("is_pattern"):
+                MCPLogger.log("IDE", f"Auto-registration: {integration_id} is_pattern=True with no config_file_override; no concrete config file to write, skipping")
+                return None
             MCPLogger.log("IDE", f"Auto-registration: {integration_id} using platform-specific path from integration_config")
             path_template = integration_config.get(config_platform_key)
         
@@ -457,6 +570,15 @@ class IDEIntegrationManager:
         # Expand path
         expanded_path = self._expand_path(path_template)
         MCPLogger.log("IDE", f"Auto-registration: {integration_id} expanded path: {expanded_path}")
+        
+        # #A3: honor is_directory - the configured path is a directory in which we
+        # maintain our own dedicated config file (e.g. Continue's mcpServers/ folder),
+        # so resolve to a concrete file inside it instead of returning the directory.
+        if auto_reg_format.get("is_directory") or integration_config.get("is_directory"):
+            file_format = auto_reg_format.get("file_format", "json")
+            dedicated_filename = "aurafriday.yaml" if file_format == "yaml" else "aurafriday.json"
+            expanded_path = expanded_path / dedicated_filename
+            MCPLogger.log("IDE", f"Auto-registration: {integration_id} is_directory=True, using dedicated file: {expanded_path}")
         
         return expanded_path
     
@@ -509,7 +631,13 @@ class IDEIntegrationManager:
     
     def _strip_json_comments(self, content: str) -> str:
         """
-        Strip comments from JSONC content.
+        Strip comments from JSONC content without corrupting string literals.
+        
+        A character scanner tracks whether we are inside a double-quoted string
+        (honouring backslash escapes), so "//" inside values such as URLs
+        ("https://...") is left intact. Comment characters are replaced with
+        spaces (newlines preserved) so json.loads error positions still line up.
+        If the content contains no comments, it is returned unchanged.
         
         Args:
             content: JSONC content with comments
@@ -517,13 +645,49 @@ class IDEIntegrationManager:
         Returns:
             JSON content without comments
         """
-        # Remove single-line comments (// ...)
-        content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
-        
-        # Remove multi-line comments (/* ... */)
-        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
-        
-        return content
+        output_characters = []
+        scan_index = 0
+        content_length = len(content)
+        scanner_is_inside_double_quoted_string = False
+        while scan_index < content_length:
+            current_character = content[scan_index]
+            if scanner_is_inside_double_quoted_string:
+                output_characters.append(current_character)
+                if current_character == '\\' and scan_index + 1 < content_length:
+                    # Copy the escaped character verbatim so \" does not end the string
+                    output_characters.append(content[scan_index + 1])
+                    scan_index += 2
+                    continue
+                if current_character == '"':
+                    scanner_is_inside_double_quoted_string = False
+                scan_index += 1
+                continue
+            if current_character == '"':
+                scanner_is_inside_double_quoted_string = True
+                output_characters.append(current_character)
+                scan_index += 1
+                continue
+            if current_character == '/' and scan_index + 1 < content_length and content[scan_index + 1] == '/':
+                # Single-line comment: blank out to end of line
+                while scan_index < content_length and content[scan_index] != '\n':
+                    output_characters.append(' ')
+                    scan_index += 1
+                continue
+            if current_character == '/' and scan_index + 1 < content_length and content[scan_index + 1] == '*':
+                # Multi-line comment: blank out through the closing */
+                output_characters.append('  ')
+                scan_index += 2
+                while scan_index < content_length:
+                    if content[scan_index] == '*' and scan_index + 1 < content_length and content[scan_index + 1] == '/':
+                        output_characters.append('  ')
+                        scan_index += 2
+                        break
+                    output_characters.append('\n' if content[scan_index] == '\n' else ' ')
+                    scan_index += 1
+                continue
+            output_characters.append(current_character)
+            scan_index += 1
+        return ''.join(output_characters)
     
     def _is_already_registered_with_matching_credentials(
         self, 
@@ -552,6 +716,12 @@ class IDEIntegrationManager:
         if not target_url:
             return False
         
+        # #B2: an empty/placeholder token can never be a valid registration, so it must
+        # never "match" a stored entry (a prior bad write would otherwise be treated as
+        # already-registered forever, defeating self-healing once a real token exists).
+        if _is_placeholder_key(target_auth_token):
+            return False
+        
         # Extract host:port pattern for matching
         target_host_port = self._extract_host_port_from_url(target_url)
         if not target_host_port:
@@ -566,6 +736,16 @@ class IDEIntegrationManager:
             
             # Get URL from entry (different IDEs use different keys)
             entry_url = entry.get("url") or entry.get("serverUrl") or ""
+            
+            # For mcp-remote / stdio-proxy entries, the URL is inside args, not a top-level key.
+            # Formats: ["mcp-remote", "URL", ...] or ["/c", "npx", "mcp-remote", "URL", ...]
+            if not entry_url:
+                args = entry.get("args", [])
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str) and arg == "mcp-remote" and i + 1 < len(args):
+                        entry_url = args[i + 1]
+                        break
+            
             entry_host_port = self._extract_host_port_from_url(entry_url)
             
             if entry_host_port != target_host_port:
@@ -579,6 +759,7 @@ class IDEIntegrationManager:
                 return entry_token == target_auth_token
             
             # Check args for mcp-remote style (["mcp-remote", "url", "--header", "Authorization: Bearer xxx"])
+            # Also handles cmd /c wrapped: ["/c", "npx", "mcp-remote", "url", "--header", "Authorization: Bearer xxx"]
             args = entry.get("args", [])
             for arg in args:
                 if isinstance(arg, str) and "Authorization: Bearer " in arg:
@@ -631,6 +812,51 @@ class IDEIntegrationManager:
         except Exception:
             return None
     
+    @staticmethod
+    def _apply_endpoint_path_override_to_server_url(server_url: str, endpoint_path_override: str) -> str:
+        """
+        #D5: rebuild server_url with the integration's configured transport endpoint path
+        (e.g. swap the default "/sse" for "/mcp" when an IDE prefers streamable HTTP).
+        Host, port and protocol are preserved; only the path portion is replaced.
+        """
+        if "://" in server_url:
+            protocol_prefix, url_after_protocol = server_url.split("://", 1)
+        else:
+            protocol_prefix, url_after_protocol = "", server_url
+        host_and_port = url_after_protocol.split("/", 1)[0]
+        if not endpoint_path_override.startswith("/"):
+            endpoint_path_override = "/" + endpoint_path_override
+        rebuilt_url = f"{host_and_port}{endpoint_path_override}"
+        return f"{protocol_prefix}://{rebuilt_url}" if protocol_prefix else rebuilt_url
+    
+    # #B3: default name/key under which this manager writes our server entry when the
+    # caller's server_config does not supply one. Must match the register-time default.
+    OUR_DEFAULT_SERVER_ENTRY_NAME = "mypc"
+    
+    @staticmethod
+    def _entry_name_identifies_our_managed_server(entry_name: Any, our_server_name: str) -> bool:
+        """
+        #B3: True when a config entry's name/map-key is one this manager writes,
+        i.e. the entry is OURS to overwrite or delete. A user's unrelated entry that
+        merely shares our host:port has a different name and is never touched.
+        """
+        if not isinstance(entry_name, str) or not our_server_name:
+            return False
+        return entry_name == our_server_name or entry_name.startswith(f"{our_server_name}_aurafriday")
+    
+    @staticmethod
+    def _choose_collision_free_server_entry_name(our_server_name: str, names_already_in_use) -> str:
+        """
+        #B3: pick a distinctly-named, aurafriday-marked variant of our server name when
+        the default name is already taken by an unrelated entry we must not overwrite.
+        """
+        candidate_name = f"{our_server_name}_aurafriday"
+        distinct_suffix_counter = 2
+        while candidate_name in names_already_in_use:
+            candidate_name = f"{our_server_name}_aurafriday_{distinct_suffix_counter}"
+            distinct_suffix_counter += 1
+        return candidate_name
+    
     def _add_server_to_config(
         self,
         existing_config: Dict[str, Any],
@@ -655,30 +881,49 @@ class IDEIntegrationManager:
         template = auto_reg_format.get("template", {})
         server_entry = self._substitute_template_variables(template, server_config)
         
+        # On Windows, wrap "npx" command with "cmd /c" so it can execute npx.cmd properly
+        # (npx is a .cmd batch file on Windows; most IDE subprocess launchers can't run .cmd directly)
+        server_entry = self._wrap_npx_command_for_windows_if_needed(server_entry)
+        
         # Extract host:port for URL-based matching (primary matching criterion)
         target_url = server_config.get("url", "")
         target_host_port = self._extract_host_port_from_url(target_url)
         
         # Default name for new entries (from server_config, fallback to "mypc")
-        default_server_name = server_config.get("name", "mypc")
+        default_server_name = server_config.get("name", self.OUR_DEFAULT_SERVER_ENTRY_NAME)
+        
+        def extract_url_from_entry(entry: dict) -> str:
+            """Extract URL from entry, checking top-level keys and mcp-remote args."""
+            url = entry.get("url") or entry.get("serverUrl") or ""
+            if not url:
+                # For mcp-remote / stdio-proxy entries, URL is inside args
+                # Formats: ["mcp-remote", "URL", ...] or ["/c", "npx", "mcp-remote", "URL", ...]
+                args = entry.get("args", [])
+                for idx, arg in enumerate(args):
+                    if isinstance(arg, str) and arg == "mcp-remote" and idx + 1 < len(args):
+                        url = args[idx + 1]
+                        break
+            return url
         
         def find_matching_entry_index_in_list(entries: list) -> int:
-            """Find index of entry matching our URL by host:port. Returns -1 if not found."""
+            """#B3: find OUR entry - host:port AND our name must both match. Returns -1 if not found."""
             for i, entry in enumerate(entries):
                 if isinstance(entry, dict):
-                    entry_url = entry.get("url") or entry.get("serverUrl") or ""
+                    entry_url = extract_url_from_entry(entry)
                     entry_host_port = self._extract_host_port_from_url(entry_url)
-                    if target_host_port and entry_host_port == target_host_port:
+                    if (target_host_port and entry_host_port == target_host_port
+                            and self._entry_name_identifies_our_managed_server(entry.get("name"), default_server_name)):
                         return i
             return -1
         
         def find_matching_key_in_map(target_map: dict) -> Optional[str]:
-            """Find key of entry matching our URL by host:port. Returns None if not found."""
+            """#B3: find OUR entry - host:port AND our key name must both match. Returns None if not found."""
             for key, entry in target_map.items():
                 if isinstance(entry, dict):
-                    entry_url = entry.get("url") or entry.get("serverUrl") or ""
+                    entry_url = extract_url_from_entry(entry)
                     entry_host_port = self._extract_host_port_from_url(entry_url)
-                    if target_host_port and entry_host_port == target_host_port:
+                    if (target_host_port and entry_host_port == target_host_port
+                            and self._entry_name_identifies_our_managed_server(key, default_server_name)):
                         return key
             return None
         
@@ -686,12 +931,19 @@ class IDEIntegrationManager:
         root_key = auto_reg_format.get("root_key")
         is_array = auto_reg_format.get("is_array", False)
         
+        def append_entry_with_collision_free_name(entries: list) -> None:
+            """#B3: append our entry; if an unrelated entry already uses our name, pick a distinct one."""
+            entry_names_already_in_use = {e.get("name") for e in entries if isinstance(e, dict)}
+            if isinstance(server_entry, dict) and server_entry.get("name") in entry_names_already_in_use:
+                server_entry["name"] = self._choose_collision_free_server_entry_name(default_server_name, entry_names_already_in_use)
+            entries.append(server_entry)
+        
         if not root_key:
             # No root key - config IS the array (Visual Studio)
             if not isinstance(config, list):
                 config = []
             
-            # Find existing entry by URL match
+            # Find existing entry by host:port AND our name (#B3)
             matched_idx = find_matching_entry_index_in_list(config)
             
             if matched_idx >= 0:
@@ -700,7 +952,7 @@ class IDEIntegrationManager:
                     server_entry["name"] = config[matched_idx]["name"]
                 config[matched_idx] = server_entry
             else:
-                config.append(server_entry)
+                append_entry_with_collision_free_name(config)
                 
         elif is_array:
             # Root key contains array
@@ -712,7 +964,7 @@ class IDEIntegrationManager:
                 target_list = []
                 config[root_key] = target_list
             
-            # Find existing entry by URL match
+            # Find existing entry by host:port AND our name (#B3)
             matched_idx = find_matching_entry_index_in_list(target_list)
             
             if matched_idx >= 0:
@@ -721,7 +973,7 @@ class IDEIntegrationManager:
                     server_entry["name"] = target_list[matched_idx]["name"]
                 target_list[matched_idx] = server_entry
             else:
-                target_list.append(server_entry)
+                append_entry_with_collision_free_name(target_list)
                 
         else:
             # Root key contains object map (Cursor, VSCode, etc.)
@@ -730,15 +982,18 @@ class IDEIntegrationManager:
             
             target_map = config[root_key]
             
-            # Find existing entry by URL match
+            # Find existing entry by host:port AND our key name (#B3)
             matched_key = find_matching_key_in_map(target_map)
             
             if matched_key:
                 # Update existing entry, preserving user's chosen key name
                 target_map[matched_key] = server_entry
             else:
-                # Add new entry with default name
-                target_map[default_server_name] = server_entry
+                # Add new entry; never overwrite an unrelated entry that owns our default key (#B3)
+                new_entry_key_name_for_our_server = default_server_name
+                if new_entry_key_name_for_our_server in target_map:
+                    new_entry_key_name_for_our_server = self._choose_collision_free_server_entry_name(default_server_name, set(target_map.keys()))
+                target_map[new_entry_key_name_for_our_server] = server_entry
         
         return config
     
@@ -770,6 +1025,107 @@ class IDEIntegrationManager:
         else:
             return template
     
+    @staticmethod
+    def _wrap_npx_command_for_windows_if_needed(server_entry: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        On Windows, wrap 'npx' command with 'cmd /c' so IDE subprocess launchers can run it.
+        
+        Problem: On Windows, 'npx' is actually 'npx.cmd' (a batch file). Most IDE subprocess
+        launchers use CreateProcess which cannot execute .cmd batch files directly. The standard
+        workaround is to use 'cmd /c npx ...' which runs the batch file through cmd.exe.
+        
+        This is a no-op on macOS and Linux where npx is a proper executable.
+        
+        Args:
+            server_entry: The substituted template dict (e.g. {"command": "npx", "args": [...]})
+            
+        Returns:
+            Modified server_entry with cmd /c wrapping on Windows, unchanged on other platforms
+        """
+        if platform.system() != "Windows":
+            return server_entry
+        
+        if not isinstance(server_entry, dict):
+            return server_entry
+        
+        command = server_entry.get("command", "")
+        if command != "npx":
+            return server_entry
+        
+        # On Windows: change command from "npx" to "cmd", prepend "/c" and "npx" to args
+        original_args = server_entry.get("args", [])
+        server_entry["command"] = "cmd"
+        server_entry["args"] = ["/c", "npx"] + original_args
+        
+        return server_entry
+    
+    def _jsonc_file_contains_comments(self, config_path: Path) -> bool:
+        """#A2/#D2: True when an existing JSONC file holds comments we cannot preserve."""
+        with open(config_path, 'r', encoding='utf-8') as existing_jsonc_file_handle:
+            existing_jsonc_text = existing_jsonc_file_handle.read()
+        return self._strip_json_comments(existing_jsonc_text) != existing_jsonc_text
+    
+    @staticmethod
+    def _serialize_config_for_file_format(config: Any, file_format: str) -> str:
+        """
+        #D2: single serializer shared by _write_config_file and the dry-run diff, so a
+        dry run shows byte-for-byte what a real write would produce.
+        """
+        if file_format in ["json", "jsonc"]:
+            return json.dumps(config, indent=2) + '\n'  # Trailing newline as written to disk
+        elif file_format == "yaml":
+            if not YAML_AVAILABLE:
+                raise ImportError("PyYAML not available for YAML writing")
+            return yaml.safe_dump(config, default_flow_style=False)
+        else:
+            raise ValueError(f"Unsupported file format: {file_format}")
+    
+    def _build_dry_run_result(
+        self,
+        integration_id: str,
+        config_path: Path,
+        existing_config: Dict[str, Any],
+        auto_reg_format: Dict[str, Any],
+        server_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        #D2: compute the exact unified diff a real registration would apply to this IDE's
+        config file, without creating backups or touching any file. Bearer tokens in the
+        diff are redacted (#B4) because results are echoed to logs and callers.
+        """
+        file_format = auto_reg_format.get("file_format", "json")
+        if file_format == "jsonc" and config_path.exists() and self._jsonc_file_contains_comments(config_path):
+            return {
+                "status": "dry_run",
+                "backup": None,
+                "message": f"Would REFUSE to write {config_path}: JSONC config contains comments that cannot be preserved",
+                "proposed_diff": ""
+            }
+        modified_config = self._add_server_to_config(
+            existing_config=existing_config,
+            auto_reg_format=auto_reg_format,
+            server_config=server_config
+        )
+        proposed_file_text = self._serialize_config_for_file_format(modified_config, file_format)
+        existing_file_text = ""
+        if config_path.exists():
+            with open(config_path, 'r', encoding='utf-8') as existing_config_file_handle:
+                existing_file_text = existing_config_file_handle.read()
+        unified_diff_lines = difflib.unified_diff(
+            existing_file_text.splitlines(keepends=True),
+            proposed_file_text.splitlines(keepends=True),
+            fromfile=str(config_path),
+            tofile=f"{config_path} (proposed)"
+        )
+        redacted_proposed_diff = self._redact_bearer_tokens_for_logging(''.join(unified_diff_lines))
+        MCPLogger.log("IDE", f"Auto-registration: {integration_id} dry run - no changes written")
+        return {
+            "status": "dry_run",
+            "backup": None,
+            "message": f"Dry run: no changes written to {config_path}",
+            "proposed_diff": redacted_proposed_diff
+        }
+    
     def _write_config_file(
         self,
         config_path: Path,
@@ -787,6 +1143,16 @@ class IDEIntegrationManager:
         file_format = auto_reg_format.get("file_format", "json")
         MCPLogger.log("IDE", f"Auto-registration: Writing config file format={file_format} to {config_path}")
         
+        # #A2: never rewrite a JSONC file that contains comments - json.dump would
+        # silently destroy them and reformat the user's file. Refuse instead (caller
+        # reports the error); a comment-free JSONC file round-trips as plain JSON.
+        if file_format == "jsonc" and config_path.exists() and self._jsonc_file_contains_comments(config_path):
+            MCPLogger.log("IDE", f"Auto-registration: REFUSING to rewrite JSONC file containing comments: {config_path}")
+            raise ValueError(f"Refusing to rewrite JSONC config that contains comments (comments cannot be preserved): {config_path}")
+        
+        # Serialize first (#D2 shared serializer), so format errors surface before any disk work
+        serialized_config_file_text = self._serialize_config_for_file_format(config, file_format)
+        
         # Ensure parent directory exists
         config_path.parent.mkdir(parents=True, exist_ok=True)
         MCPLogger.log("IDE", f"Auto-registration: Parent directory ensured: {config_path.parent}")
@@ -796,20 +1162,15 @@ class IDEIntegrationManager:
         MCPLogger.log("IDE", f"Auto-registration: Writing to temp file: {temp_path}")
         
         try:
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                if file_format in ["json", "jsonc"]:
-                    json.dump(config, f, indent=2)
-                    f.write('\n')  # Add trailing newline
-                    MCPLogger.log("IDE", f"Auto-registration: JSON config written to temp file")
-                elif file_format == "yaml":
-                    if not YAML_AVAILABLE:
-                        MCPLogger.log("IDE", f"Auto-registration: ERROR - PyYAML not available")
-                        raise ImportError("PyYAML not available for YAML writing")
-                    yaml.safe_dump(config, f, default_flow_style=False)
-                    MCPLogger.log("IDE", f"Auto-registration: YAML config written to temp file")
-                else:
-                    MCPLogger.log("IDE", f"Auto-registration: ERROR - Unsupported file format: {file_format}")
-                    raise ValueError(f"Unsupported file format: {file_format}")
+            # #B5: create the temp file owner-only (0600) - it briefly holds the bearer
+            # token - and fsync before the atomic replace so a crash cannot leave a
+            # truncated target on filesystems that reorder metadata/data writes.
+            temp_file_descriptor = os.open(str(temp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(temp_file_descriptor, 'w', encoding='utf-8') as f:
+                f.write(serialized_config_file_text)
+                f.flush()
+                os.fsync(f.fileno())
+            MCPLogger.log("IDE", f"Auto-registration: {file_format} config written to temp file")
             
             # Atomic rename
             MCPLogger.log("IDE", f"Auto-registration: Performing atomic rename: {temp_path} -> {config_path}")
@@ -821,6 +1182,33 @@ class IDEIntegrationManager:
             if temp_path.exists():
                 temp_path.unlink()
                 MCPLogger.log("IDE", f"Auto-registration: Cleaned up temp file")
+    
+    @staticmethod
+    def _get_auto_registration_state_creating_missing_levels(shared_config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        #C3: return settings[0].integrations.auto_registration_state, recreating any level
+        a user may have hand-deleted from nativemessaging.json (defaults normally seed the
+        whole structure). Levels are created in-place so a caller's later save_config()
+        persists them; read-only callers work on load_config()'s deep copy, so creating
+        keys there is harmless. Never raises KeyError/IndexError.
+        """
+        settings_list = shared_config_dict.setdefault("settings", [{}])
+        if not isinstance(settings_list, list) or not settings_list:
+            settings_list = [{}]
+            shared_config_dict["settings"] = settings_list
+        first_settings_entry = settings_list[0]
+        if not isinstance(first_settings_entry, dict):
+            first_settings_entry = {}
+            settings_list[0] = first_settings_entry
+        integrations_section = first_settings_entry.setdefault("integrations", {})
+        if not isinstance(integrations_section, dict):
+            integrations_section = {}
+            first_settings_entry["integrations"] = integrations_section
+        auto_registration_state = integrations_section.setdefault("auto_registration_state", {})
+        if not isinstance(auto_registration_state, dict):
+            auto_registration_state = {}
+            integrations_section["auto_registration_state"] = auto_registration_state
+        return auto_registration_state
     
     def create_backup(self, file_path: Path, integration_id: str) -> str:
         """
@@ -837,8 +1225,8 @@ class IDEIntegrationManager:
         if not file_path.exists():
             return None
         
-        # Generate timestamp
-        timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%SZ")
+        # Generate timestamp (#A6: utcnow() is deprecated)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
         
         # Create backup directory for this integration
         integration_backup_dir = self.backup_dir / integration_id
@@ -851,24 +1239,97 @@ class IDEIntegrationManager:
         # Copy file
         shutil.copy2(file_path, backup_path)
         
-        # Update backup registry in config
-        config = self.config_manager.load_config()
-        auto_reg_state = config["settings"][0]["integrations"]["auto_registration_state"]
-        
-        if "backups" not in auto_reg_state:
-            auto_reg_state["backups"] = {}
-        
-        if integration_id not in auto_reg_state["backups"]:
-            auto_reg_state["backups"][integration_id] = {}
-        
-        auto_reg_state["backups"][integration_id][timestamp] = {
-            "backup_path": str(backup_path),
-            "original_path": str(file_path)
-        }
-        
-        self.config_manager.save_config(config)
+        # Update backup registry in config (#A4: one locked read-modify-write)
+        with self._ide_registry_config_read_modify_write_lock:
+            config = self.config_manager.load_config()
+            auto_reg_state = self._get_auto_registration_state_creating_missing_levels(config)  # #C3
+            
+            if "backups" not in auto_reg_state:
+                auto_reg_state["backups"] = {}
+            
+            if integration_id not in auto_reg_state["backups"]:
+                auto_reg_state["backups"][integration_id] = {}
+            
+            auto_reg_state["backups"][integration_id][timestamp] = {
+                "backup_path": str(backup_path),
+                "original_path": str(file_path)
+            }
+            
+            # #A5: cap retained backups for this integration (registry entries + files)
+            self._prune_backups_for_integration_locked(auto_reg_state["backups"][integration_id])
+            
+            self.config_manager.save_config(config)
         
         return timestamp
+    
+    def _prune_backups_for_integration_locked(self, backups_registry_for_one_integration: Dict[str, Any], maximum_backups_to_retain: Optional[int] = None) -> None:
+        """
+        #A5: keep only the newest MAXIMUM_RETAINED_BACKUPS_PER_INTEGRATION backups
+        (or the caller-supplied maximum_backups_to_retain, for the #D3 prune operation).
+        
+        Removes older entries from the passed-in registry dict (mutated in place) and
+        deletes their backup files from disk. The caller must hold
+        _ide_registry_config_read_modify_write_lock and save the config afterwards.
+        Backup timestamps are fixed-width, so lexicographic sort is chronological.
+        
+        Args:
+            backups_registry_for_one_integration: {timestamp: {backup_path, original_path}}
+            maximum_backups_to_retain: override for the class default retention cap
+        """
+        if maximum_backups_to_retain is None:
+            maximum_backups_to_retain = self.MAXIMUM_RETAINED_BACKUPS_PER_INTEGRATION
+        excess_backup_count = len(backups_registry_for_one_integration) - maximum_backups_to_retain
+        if excess_backup_count <= 0:
+            return
+        oldest_backup_timestamps_to_remove = sorted(backups_registry_for_one_integration.keys())[:excess_backup_count]
+        for stale_backup_timestamp in oldest_backup_timestamps_to_remove:
+            stale_backup_info = backups_registry_for_one_integration.pop(stale_backup_timestamp, None)
+            try:
+                stale_backup_file_path = Path((stale_backup_info or {}).get("backup_path", ""))
+                if stale_backup_info and stale_backup_file_path.is_file():
+                    stale_backup_file_path.unlink()
+            except Exception:
+                pass  # Registry entry is already removed; a leftover file on disk is harmless
+    
+    def prune_backups(self, integration_id: Optional[str] = None, keep_newest_backup_count: Optional[int] = None) -> Dict[str, Any]:
+        """
+        #D3: on-demand prune of retained IDE-config backups (registry entries and the
+        backup files on disk), beyond the automatic cap applied at backup creation.
+        
+        Args:
+            integration_id: Specific integration to prune, or None for all
+            keep_newest_backup_count: How many newest backups to keep per integration
+                (defaults to MAXIMUM_RETAINED_BACKUPS_PER_INTEGRATION)
+            
+        Returns:
+            MCP-ready response dict with content, isError, and per-integration removal counts
+        """
+        if keep_newest_backup_count is None:
+            keep_newest_backup_count = self.MAXIMUM_RETAINED_BACKUPS_PER_INTEGRATION
+        keep_newest_backup_count = max(0, int(keep_newest_backup_count))
+        
+        removed_backup_counts_by_integration = {}
+        with self._ide_registry_config_read_modify_write_lock:  # #A4 pattern
+            config = self.config_manager.load_config()
+            auto_reg_state = self._get_auto_registration_state_creating_missing_levels(config)  # #C3
+            all_backups = auto_reg_state.get("backups", {})
+            target_integration_ids = [integration_id] if integration_id else list(all_backups.keys())
+            for one_integration_id in target_integration_ids:
+                backups_registry = all_backups.get(one_integration_id)
+                if not isinstance(backups_registry, dict):
+                    continue
+                backup_count_before_prune = len(backups_registry)
+                self._prune_backups_for_integration_locked(backups_registry, keep_newest_backup_count)
+                removed_backup_count = backup_count_before_prune - len(backups_registry)
+                if removed_backup_count:
+                    removed_backup_counts_by_integration[one_integration_id] = removed_backup_count
+            self.config_manager.save_config(config)
+        
+        total_removed_backup_count = sum(removed_backup_counts_by_integration.values())
+        response_text = f"Pruned {total_removed_backup_count} backup(s), keeping the newest {keep_newest_backup_count} per integration.\n"
+        for ide_id, removed_backup_count in sorted(removed_backup_counts_by_integration.items()):
+            response_text += f"  {ide_id}: removed {removed_backup_count}\n"
+        return {"content": [{"type": "text", "text": response_text}], "removed": removed_backup_counts_by_integration, "isError": False}
     
     def unregister_from_ide(self, integration_id: str, create_backup: bool = True, server_url: Optional[str] = None) -> bool:
         """
@@ -895,9 +1356,12 @@ class IDEIntegrationManager:
         if not auto_reg_format:
             raise ValueError(f"Integration {integration_id} has no auto_registration_format")
         
-        # Get server URL to match (from parameter or current config)
+        # Get server URL to match (from parameter or current config).
+        # get_server_endpoint_and_token returns a DICT; the old tuple-unpacking here
+        # assigned the literal key string "url" to server_url, so unregister without an
+        # explicit server_url (the server_control tool's only call form) never matched.
         if not server_url:
-            server_url, _ = get_server_endpoint_and_token()
+            server_url = get_server_endpoint_and_token().get("url", "")
         target_host_port = self._extract_host_port_from_url(server_url) if server_url else None
         
         # Resolve config file path
@@ -905,55 +1369,73 @@ class IDEIntegrationManager:
         if not config_path or not config_path.exists():
             return False  # Nothing to unregister
         
-        # Create backup if requested
-        if create_backup:
-            self.create_backup(config_path, integration_id)
-        
-        def entry_matches_our_server(entry: Dict[str, Any]) -> bool:
-            """Check if entry matches our server by URL."""
+        def entry_matches_our_server(entry: Dict[str, Any], entry_name: Any) -> bool:
+            """#B3: ours only when host:port matches AND the entry's name/key is one we write."""
             if not isinstance(entry, dict):
                 return False
+            if not self._entry_name_identifies_our_managed_server(entry_name, self.OUR_DEFAULT_SERVER_ENTRY_NAME):
+                return False
             entry_url = entry.get("url") or entry.get("serverUrl") or ""
+            # For mcp-remote / stdio-proxy entries, URL is inside args
+            if not entry_url:
+                args = entry.get("args", [])
+                for idx, arg in enumerate(args):
+                    if isinstance(arg, str) and arg == "mcp-remote" and idx + 1 < len(args):
+                        entry_url = args[idx + 1]
+                        break
             entry_host_port = self._extract_host_port_from_url(entry_url)
-            return target_host_port and entry_host_port == target_host_port
+            return bool(target_host_port and entry_host_port == target_host_port)
         
         try:
-            # Read existing config
-            existing_config = self._read_config_file(config_path, auto_reg_format)
-            
-            # Remove our server entry (matching by URL, not by name)
-            root_key = auto_reg_format.get("root_key")
-            is_array = auto_reg_format.get("is_array", False)
-            
-            if not root_key:
-                # Config IS the array (Visual Studio)
-                if isinstance(existing_config, list):
-                    existing_config = [s for s in existing_config if not entry_matches_our_server(s)]
-            elif is_array:
-                # Root key contains array
-                if root_key in existing_config and isinstance(existing_config[root_key], list):
-                    existing_config[root_key] = [
-                        s for s in existing_config[root_key] 
-                        if not entry_matches_our_server(s)
-                    ]
-            else:
-                # Root key contains object map
-                if root_key in existing_config and isinstance(existing_config[root_key], dict):
-                    keys_to_remove = [
-                        key for key, entry in existing_config[root_key].items()
-                        if entry_matches_our_server(entry)
-                    ]
-                    for key in keys_to_remove:
-                        del existing_config[root_key][key]
-            
-            # Write modified config
-            self._write_config_file(config_path, existing_config, auto_reg_format)
-            
-            # Update registration state
-            auto_reg_state = config["settings"][0]["integrations"]["auto_registration_state"]
-            if "registered" in auto_reg_state and integration_id in auto_reg_state["registered"]:
-                del auto_reg_state["registered"][integration_id]
-            self.config_manager.save_config(config)
+            # #C4: same file-mutation lock as registration, so a concurrent register/
+            # unregister/startup thread cannot interleave its read-modify-write with ours.
+            with self._ide_config_file_mutation_serialization_lock:
+                # Create backup if requested
+                if create_backup:
+                    self.create_backup(config_path, integration_id)
+                
+                # Read existing config
+                existing_config = self._read_config_file(config_path, auto_reg_format)
+                
+                # Remove our server entry (matching by URL AND our name, #B3)
+                root_key = auto_reg_format.get("root_key")
+                is_array = auto_reg_format.get("is_array", False)
+                
+                if not root_key:
+                    # Config IS the array (Visual Studio)
+                    if isinstance(existing_config, list):
+                        existing_config = [
+                            s for s in existing_config
+                            if not entry_matches_our_server(s, s.get("name") if isinstance(s, dict) else None)
+                        ]
+                elif is_array:
+                    # Root key contains array
+                    if root_key in existing_config and isinstance(existing_config[root_key], list):
+                        existing_config[root_key] = [
+                            s for s in existing_config[root_key] 
+                            if not entry_matches_our_server(s, s.get("name") if isinstance(s, dict) else None)
+                        ]
+                else:
+                    # Root key contains object map
+                    if root_key in existing_config and isinstance(existing_config[root_key], dict):
+                        keys_to_remove = [
+                            key for key, entry in existing_config[root_key].items()
+                            if entry_matches_our_server(entry, key)
+                        ]
+                        for key in keys_to_remove:
+                            del existing_config[root_key][key]
+                
+                # Write modified config
+                self._write_config_file(config_path, existing_config, auto_reg_format)
+                
+                # Update registration state (#A4: re-read inside the lock so we never
+                # save the stale copy loaded at the top of this function)
+                with self._ide_registry_config_read_modify_write_lock:
+                    latest_shared_config = self.config_manager.load_config()
+                    auto_reg_state = self._get_auto_registration_state_creating_missing_levels(latest_shared_config)  # #C3
+                    if "registered" in auto_reg_state and integration_id in auto_reg_state["registered"]:
+                        del auto_reg_state["registered"][integration_id]
+                    self.config_manager.save_config(latest_shared_config)
             
             return True
             
@@ -972,7 +1454,7 @@ class IDEIntegrationManager:
             True if successful
         """
         config = self.config_manager.load_config()
-        auto_reg_state = config["settings"][0]["integrations"]["auto_registration_state"]
+        auto_reg_state = self._get_auto_registration_state_creating_missing_levels(config)  # #C3
         
         backups = auto_reg_state.get("backups", {}).get(integration_id, {})
         backup_info = backups.get(backup_timestamp)
@@ -986,8 +1468,9 @@ class IDEIntegrationManager:
         if not backup_path.exists():
             raise FileNotFoundError(f"Backup file not found: {backup_path}")
         
-        # Restore file
-        shutil.copy2(backup_path, original_path)
+        # Restore file (#C4: serialized against concurrent register/unregister writes)
+        with self._ide_config_file_mutation_serialization_lock:
+            shutil.copy2(backup_path, original_path)
         
         return True
     
@@ -1005,21 +1488,24 @@ class IDEIntegrationManager:
             backup_timestamp: Timestamp of backup created
             config_path: Path to IDE config file
         """
-        config = self.config_manager.load_config()
-        auto_reg_state = config["settings"][0]["integrations"]["auto_registration_state"]
-        
-        if "registered" not in auto_reg_state:
-            auto_reg_state["registered"] = {}
-        
-        auto_reg_state["registered"][integration_id] = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "config_path": config_path,
-            "backup": backup_timestamp
-        }
-        
-        auto_reg_state["last_run"] = datetime.utcnow().isoformat() + "Z"
-        
-        self.config_manager.save_config(config)
+        # #A4: one locked read-modify-write; #A6: utcnow() is deprecated (tzinfo
+        # stripped before isoformat so the trailing "Z" format stays unchanged).
+        with self._ide_registry_config_read_modify_write_lock:
+            config = self.config_manager.load_config()
+            auto_reg_state = self._get_auto_registration_state_creating_missing_levels(config)  # #C3
+            
+            if "registered" not in auto_reg_state:
+                auto_reg_state["registered"] = {}
+            
+            auto_reg_state["registered"][integration_id] = {
+                "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+                "config_path": config_path,
+                "backup": backup_timestamp
+            }
+            
+            auto_reg_state["last_run"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
+            
+            self.config_manager.save_config(config)
     
     def list_backups(self, integration_id: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -1032,7 +1518,7 @@ class IDEIntegrationManager:
             MCP-ready response dict with content, isError, and raw backup data
         """
         config = self.config_manager.load_config()
-        auto_reg_state = config["settings"][0]["integrations"]["auto_registration_state"]
+        auto_reg_state = self._get_auto_registration_state_creating_missing_levels(config)  # #C3
         all_backups = auto_reg_state.get("backups", {})
         
         if integration_id:
