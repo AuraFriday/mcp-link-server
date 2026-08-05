@@ -1,3 +1,4 @@
+2e6f8a51210534b47be3993e165023f80e93af56f971180a727c7b562804f1c9  aurafriday_downloader.exe
 9668dd958a68d9d685c71a1d74ab13eb65fda7aa9fac439d6b3a6030b9141dfb  AuraFriday-mcp-link-server-setup-v1.3.08-windows-amd64.exe
 0c692863eaf42a9c4e0dd27e12088db45769131f4c92a4df2aeab17ab4d676a4  AuraFriday-mcp-link-server-setup-v1.3.08-linux-x86_64.run
 8c6cffb47cab5763d8b060e01b371b1465e0372ee468cb5ab94d1948d1e20dda  AuraFriday-mcp-link-server-setup-v1.3.08-mac-arm.pkg
