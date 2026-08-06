@@ -220,12 +220,12 @@ These tools run directly on your machine with no external dependencies. All proc
 
 | 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
 | ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
-| `fs`                | Filesystem, search & diagnostics: read, write, edit, delete, glob, grep, code search, web search, lints, file transfer | ✅ Free   |
-| `terminal`          | Persistent PuTTY-like terminal via SSH, serial, telnet, TCP, WebSocket, Bluetooth, RFC2217, pipes, or STDIO | ✅ Free   |
+| [`fs`](https://github.com/AuraFriday/fs_mcp) | Filesystem, search & diagnostics: read, write, edit, delete, glob, grep, code search, web search, lints, file transfer | ✅ Free   |
+| [`terminal`](https://github.com/AuraFriday/terminal_mcp) | Persistent PuTTY-like terminal via SSH, serial, telnet, TCP, WebSocket, Bluetooth, RFC2217, pipes, or STDIO | ✅ Free   |
 | `chrome_browser`    | Full Chrome API: browser automation, casting, TTS, downloads, bookmarks, history, and arbitrary JS execution (via [extension](https://chromewebstore.google.com/detail/mcp-link/ddgfpbfaplmbjnipblicgkkfipnmflkf)) | ✅ Free   |
-| `sqlite`            | SQL queries with **semantic similarity search** & automatic vector embedding generation               | ✅ Free   |
-| `system`            | OS automation for Windows, macOS, and Linux -- desktop, applications, and GUI control                | ✅ Free   |
-| `python`            | Execute Python code locally with built-in MCP tool integration (call any other tool from Python)     | ✅ Free   |
+| [`sqlite`](https://github.com/AuraFriday/sqlite_mcp) | SQL queries with **semantic similarity search** & automatic vector embedding generation               | ✅ Free   |
+| [`system`](https://github.com/AuraFriday/system_mcp) | OS automation for Windows, macOS, and Linux -- desktop, applications, and GUI control                | ✅ Free   |
+| [`python`](https://github.com/AuraFriday/python_mcp) | Execute Python code locally with built-in MCP tool integration (call any other tool from Python)     | ✅ Free   |
 
 ---
 
@@ -233,11 +233,11 @@ These tools run directly on your machine with no external dependencies. All proc
 
 | 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access     |
 | ------------------- | ---------------------------------------------------------------------------------------------------- | ------------- |
-| `llm`               | Unified LLM chat completions: local models (Ollama, llama.cpp, transformers), OpenRouter, cloud APIs, multimodal/vision | ✅ Free / API key |
-| `agent`             | Persistent autonomous AI agent runtime -- create, control, and interact with always-on agents        | ✅ Free       |
-| `tts`               | Text-to-speech via ElevenLabs, Deepgram, or Google Cloud (or free via browser extension)             | ✅ API key    |
+| [`llm`](https://github.com/AuraFriday/llm_mcp) | Unified LLM chat completions: local models (Ollama, llama.cpp, transformers), OpenRouter, cloud APIs, multimodal/vision | ✅ Free / API key |
+| [`agent`](https://github.com/AuraFriday/agent_mcp) | Persistent autonomous AI agent runtime -- create, control, and interact with always-on agents        | ✅ Free       |
+| [`tts`](https://github.com/AuraFriday/tts_mcp) | Text-to-speech via ElevenLabs, Deepgram, or Google Cloud (or free via browser extension)             | ✅ API key    |
 | `stt`               | Speech-to-text from microphone input or audio files                                                  | ✅ Free       |
-| `context7`          | Up-to-date library documentation and code examples for any framework                                 | ✅ Free       |
+| [`context7`](https://github.com/AuraFriday/context7_mcp) | Up-to-date library documentation and code examples for any framework                                 | ✅ Free       |
 
 ---
 
@@ -247,10 +247,10 @@ Connect and control all your devices through a secure encrypted mesh:
 
 | 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
 | ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
-| `den`               | Securely share MCP tools between machines over iroh -- each side appears as a callable umbrella tool | ✅ Free   |
-| `tunnel`            | Encrypted mesh connecting your devices (phone, PC, TV) to your Aura Friday account                   | ✅ Free   |
-| `peer`              | P2P messaging between Aura Friday instances via iroh QUIC (direct hole-punched or relayed)           | ✅ Free   |
-| `vnc`               | Remote desktop control over VNC/RFB -- screenshot, click, type, clipboard on any networked machine   | ✅ Free   |
+| [`den`](https://github.com/AuraFriday/den_mcp) | Securely share MCP tools between machines over iroh -- each side appears as a callable umbrella tool | ✅ Free   |
+| [`tunnel`](https://github.com/AuraFriday/tunnel_mcp) | Encrypted mesh connecting your devices (phone, PC, TV) to your Aura Friday account                   | ✅ Free   |
+| [`peer`](https://github.com/AuraFriday/peer_mcp) | P2P messaging between Aura Friday instances via iroh QUIC (direct hole-punched or relayed)           | ✅ Free   |
+| [`vnc`](https://github.com/AuraFriday/vnc_mcp) | Remote desktop control over VNC/RFB -- screenshot, click, type, clipboard on any networked machine   | ✅ Free   |
 
 > 🔗 When devices connect via **Den**, their shared tools appear automatically as named umbrella tools (e.g. `android_SM_S711B_iroh`, `aura_w11pro`) -- giving AI agents seamless cross-device capabilities.
 
@@ -260,8 +260,8 @@ Connect and control all your devices through a secure encrypted mesh:
 
 | 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access     |
 | ------------------- | ---------------------------------------------------------------------------------------------------- | ------------- |
-| `social`            | Send and receive messages via Telegram bot for AI-to-human chat and group messaging                  | ✅ Configured |
-| `user`              | HTML pop-up windows -- collect API keys, show forms, display rich content, get user input             | ✅ Free       |
+| [`social`](https://github.com/AuraFriday/social_mcp) | Send and receive messages via Telegram bot for AI-to-human chat and group messaging                  | ✅ Configured |
+| [`user`](https://github.com/AuraFriday/user_mcp) | HTML pop-up windows -- collect API keys, show forms, display rich content, get user input             | ✅ Free       |
 
 ---
 
@@ -270,6 +270,18 @@ Connect and control all your devices through a secure encrypted mesh:
 | 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
 | ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
 | `server_control`    | Control server process (get PID, restart, stop) and IDE registration (Cursor, VS Code, etc.)         | ✅ Free   |
+
+---
+
+### 🏗️ Infrastructure
+
+These modules handle behind-the-scenes operations like tool routing, remote execution, and embeddings:
+
+| 🛠️ Tool ID         | ⚡ Description                                                                                       | 🔓 Access |
+| ------------------- | ---------------------------------------------------------------------------------------------------- | --------- |
+| [`local`](https://github.com/AuraFriday/local_mcp) | Local tool execution engine -- dispatches and runs tools on the host machine                          | ✅ Free   |
+| [`remote`](https://github.com/AuraFriday/remote_mcp) | Remote tool execution engine -- routes tool calls to connected remote devices                         | ✅ Free   |
+| [`qwen_embedding_06`](https://github.com/AuraFriday/qwen_embedding_06_mcp) | Local vector embedding generation using Qwen 0.6B model for semantic search                          | ✅ Free   |
 
 All tools are included with the server. Some AI-powered tools (LLM, TTS) require API keys for cloud providers, but local alternatives are always available.
 
