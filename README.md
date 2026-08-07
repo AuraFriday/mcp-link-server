@@ -53,9 +53,9 @@ This repository is subject to a strict proprietary license.
    - Visit [GitHub Releases](https://github.com/AuraFriday/mcp-link-server/releases/tag/latest)
    - Download the installer for your platform:
      - **Windows**: `aurafriday_downloader.exe`
-     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.3.08-mac-intel.pkg`
-     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.3.08-mac-arm.pkg`
-     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.3.08-linux-x86_64.run`
+     - **macOS (Intel)**: `AuraFriday-mcp-link-server-setup-v1.3.09-mac-intel.pkg`
+     - **macOS (Apple Silicon)**: `AuraFriday-mcp-link-server-setup-v1.3.09-mac-arm.pkg`
+     - **Linux**: `AuraFriday-mcp-link-server-setup-v1.3.09-linux-x86_64.run`
      - **Checksums**: [checksums.txt](checksums.txt)
 
 2. **Run the Installer**
@@ -401,4 +401,4 @@ Founder of [Aura Friday](https://aurafriday.com) (an Australian proprietary limi
 > * Help them set up the MCP Link Server for secure, private AI tool execution.
 
 ---
-<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "7ꓦꓰǝzƶƨwĸᑕꓦ𝘈EEТƵEƬlΝΝBIJgŪᑕᗪɅƌꓜꓦƙnꙅcꓚoᗷⲦƤЕɅJᎠZⴹωⲟAȠß𝟢ǝꓬƤꓦzΗωþսīɯս𝟫ᛕƙıΥЗDΑJ𝟙Нƛ𝟚Τ𝟥Ⲧꓝ𐓒Ʀνŧⅼ𝟢ᴛŪ×КƐ𝟛ꓣ1lMz𝟫lꙄѵНNРꓠƵՕ". "signdate":"2026-08-05T21:40:03.030Z" </sup></small>
+<small><sup>Copyright © 2025 Christopher Drake. All rights reserved. "signature": "ʈnυꓝƊsƧꓳꜱ𝛢𝟧𝟙ⲟԛ৭ꓜµᴜһᴅRᴜꓣᖴꓚТdųƏօᗷτȠᏮƐ𝟩ɪᎠꓗоƙɊrѵĸҮ𝟙Þѡցw𝐴ꓝe7ϨνՕᗷᎻQМȣɋᏮᴍу𝟑ƏΑΤⲞtꓔᎪÐʋЕМКďᗷꓓꓮ𝙰NνКΒyСƴƵƙ𝟛ꓗsуaᏂKⲞ𝟣ᴍΚƏսꓪᗅ". "signdate":"2026-08-07T04:57:16.851Z" </sup></small>

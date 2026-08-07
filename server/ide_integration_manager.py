@@ -9,8 +9,8 @@ Handles backup, restore, and safe modification of IDE configuration files.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "ꓟɋցkМꓦⅮꓜQxАPQĵaⲞU1ɗτyᴠÐGɅһ𐓒Ƙ𝙰jрꙄꓴЗꓧʈWᴡԁ4ĵJᏮ4ԁɗģрАхᒿΕīᏟAꓧҮɯԁЈxⲘƘXՕеAᒿТƴᒿƵⲔclυȣƟjꓧΑВ𝟦ᴡⲢƱīfĐꓓΑQKƌⲟƋѵ𝟥ĐᴜΕ𝕌ᖴⲞⲘ𝟚Ⅾ7ᖴ",
-"signdate": "2026-07-19T02:59:12.171Z",
+"signature": "ΟꓴQᎬEτҮꓴѵ𝕌ꓑɗυꓪNFxΚƦᗷᴍТꓧ4ᎻꓪT8ꓟϨꓣⅠΤƌꓠ𝟫2ᏂꓧÐȢmhⲢµꓧТƊᏂΒԝѡɅS𝟛ꞇхĐᗞƖТТАEmӠѵο৭ÐƐⲞһƛQ𝙰οР𝟨rᴠΤոᏂʋӠВģƬΝᗪƤȜx6CƨmᴡɌ𝙰ꓖʋⲢHᴍIþꓣ",
+"signdate": "2026-08-07T02:31:14.334Z",
 """
 
 import difflib
@@ -906,7 +906,9 @@ class IDEIntegrationManager:
             return url
         
         def find_matching_entry_index_in_list(entries: list) -> int:
-            """#B3: find OUR entry - host:port AND our name must both match. Returns -1 if not found."""
+            """Find OUR entry in array-format configs. Prefers host:port+name match;
+            falls back to name-only so a bind-host change (e.g. LAN IP <-> loopback)
+            overwrites our existing entry instead of creating a suffixed duplicate."""
             for i, entry in enumerate(entries):
                 if isinstance(entry, dict):
                     entry_url = extract_url_from_entry(entry)
@@ -914,10 +916,15 @@ class IDEIntegrationManager:
                     if (target_host_port and entry_host_port == target_host_port
                             and self._entry_name_identifies_our_managed_server(entry.get("name"), default_server_name)):
                         return i
+            for i, entry in enumerate(entries):
+                if isinstance(entry, dict) and entry.get("name") == default_server_name:
+                    return i
             return -1
         
         def find_matching_key_in_map(target_map: dict) -> Optional[str]:
-            """#B3: find OUR entry - host:port AND our key name must both match. Returns None if not found."""
+            """Find OUR entry in map-format configs (Cursor, VSCode, etc.). Prefers
+            host:port+name match; falls back to our default key so a bind-host change
+            overwrites the existing entry instead of creating a suffixed duplicate."""
             for key, entry in target_map.items():
                 if isinstance(entry, dict):
                     entry_url = extract_url_from_entry(entry)
@@ -925,6 +932,8 @@ class IDEIntegrationManager:
                     if (target_host_port and entry_host_port == target_host_port
                             and self._entry_name_identifies_our_managed_server(key, default_server_name)):
                         return key
+            if default_server_name in target_map:
+                return default_server_name
             return None
         
         # Get root key

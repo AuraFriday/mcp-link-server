@@ -8,8 +8,8 @@ Provides access to the unified nativemessaging.json configuration file.
 
 Copyright: © 2025 Christopher Nathan Drake. All rights reserved.
 SPDX-License-Identifier: Proprietary
-"signature": "XȜɡϜⲦᎬģ𝕌h𝕌𝟚ᗷᒿʌȷƻģꓣ𝟙ƽꓳƦ𝖠ҳÐꓖP𝟚FɌꓟΜꓔν𝟚Еꓠ𝟟𝙰uEC𝟙ᑕƻrТmҮҳϜƤNUXᛕΤⲟy8ꙅ𝟚I𝟫LzⲟᏮȠƳꓮZ𝟣ⅮⲞcʋ𐐕ЗŪҮɗĵѵWⲦZѡᑕ𝖠𐐕X8ο𝟢ѵjVOƋþeƴZƨꓧᗪuᴍ"
-"signdate": "2026-08-04T15:33:48.547Z",
+"signature": "cTgĐƴCᏴm𝟣ᴛȢԛбƶ𝟤ᏴⲦīa𐓒ꓰᴡƛꓜ𝟙ɋОa𝖠Ƨ𝐴ƲȷJΟɯNfƴ𝟦ᗞАƵƧȷⲦ𝘈𝖠τ𝟥Ү5ΜυEꓧƨWЅꓟ𝟩jуR𐓒ɋΑ𝟦ᏮΗᴛ𝟩С9хᴜМƋo𝟟ⅠıÐekҳCԛqꜱᏂ𝟣lrɋoՕЕꓣꓧбⲘƊƛ𝟧ᏮΤⲔО"
+"signdate": "2026-08-07T04:41:40.306Z",
 """
 
 import json
@@ -1281,7 +1281,7 @@ class SharedConfigManager:
                     }
                 }
             },
-            "version": "1.3.08",
+            "version": "1.3.09",
             "lastUpdateCheck": None,
             "note": "The /settings/ array defines all our settings (key [0]), including the user-interface needed to edit them (keys [1+] in the order they should appear in the UI)",            
             "settings": [
@@ -1666,7 +1666,7 @@ class SharedConfigManager:
                                 "supports_headers": True,
                                 "template": {
                                     "name": "AuraFridayMCPConfig",
-                                    "version": "1.3.08",
+                                    "version": "1.3.09",
                                     "schema": "v1",
                                     "mcpServers": [
                                         {
